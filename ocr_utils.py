@@ -2,9 +2,11 @@
 Convierte fotos/imágenes de facturas (jpg, png, etc.) en un PDF con una
 capa de texto OCR superpuesta, para poder reusar TAL CUAL el mismo
 pipeline de extracción de CABECERA que ya existe en parser.py para PDFs
-digitales. Además, reconstruye la tabla de ítems por posición de
-palabras (ver ocr_items.py), ya que una foto no tiene líneas de tabla
-reales y pdfplumber.extract_tables() no encuentra nada ahí.
+digitales. Además, reconstruye por posición de palabras:
+- la tabla de ítems (ver ocr_items.py)
+- la fila de Neto/Subtotal/IVA/Total del pie (ver ocr_totales.py)
+porque una foto no tiene líneas de tabla reales y pdfplumber no
+encuentra nada ahí.
 
 Requiere tener instalado el BINARIO de Tesseract OCR en el sistema
 operativo (no alcanza con el paquete de Python `pytesseract`, que es
@@ -18,6 +20,7 @@ import pytesseract
 from PIL import Image, ImageOps
 
 from ocr_items import extraer_items_desde_imagen
+from ocr_totales import extraer_totales_desde_imagen
 
 # Extensiones de imagen que la app acepta además de .pdf
 EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
@@ -69,18 +72,18 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     """
     Toma la ruta de una imagen, le corre OCR y genera en `ruta_pdf_salida`
     un PDF con la imagen + el texto reconocido superpuesto. Además
-    reconstruye la tabla de ítems por posición de palabras.
+    reconstruye la tabla de ítems y la fila de totales por posición de
+    palabras.
 
     Si se pasa `ruta_texto_debug`, también guarda ahí el texto plano que
     reconoció el OCR, útil para diagnosticar cuando fallan campos.
 
-    Devuelve una tupla (ruta_pdf, items, advertencia):
-    - items: lista de dicts con los ítems reconstruidos (puede ser []
-      si no se pudo detectar la tabla).
+    Devuelve una tupla (ruta_pdf, items, totales, advertencia):
+    - items: lista de dicts con los ítems reconstruidos (puede ser []).
+    - totales: dict {neto/subtotal/iva/total: valor_texto} (puede ser {}).
     - advertencia: None si todo salió bien, o un mensaje para mostrarle
       al usuario si el reconocimiento corrió en inglés por faltar el
-      paquete de idioma español (lo cual explica que fallen muchos/todos
-      los campos).
+      paquete de idioma español.
     """
     advertencia = None
     idioma = "spa" if _hay_idioma_espanol() else None
@@ -118,9 +121,15 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         try:
             items = extraer_items_desde_imagen(imagen, lang=lang_usado or "eng")
         except Exception:
-            # La reconstrucción de ítems es un heurístico best-effort: si
-            # falla, seguimos con la cabecera igual (no interrumpe el flujo).
+            # La reconstrucción de ítems/totales es un heurístico
+            # best-effort: si falla, seguimos con la cabecera igual (no
+            # interrumpe el flujo).
             items = []
+
+        try:
+            totales = extraer_totales_desde_imagen(imagen, lang=lang_usado or "eng")
+        except Exception:
+            totales = {}
 
     with open(ruta_pdf_salida, "wb") as f:
         f.write(pdf_bytes)
@@ -129,4 +138,4 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         with open(ruta_texto_debug, "w", encoding="utf-8") as f:
             f.write(texto)
 
-    return ruta_pdf_salida, items, advertencia
+    return ruta_pdf_salida, items, totales, advertencia

@@ -1,0 +1,115 @@
+"""
+Reconstruye Neto/IVA/Subtotal/Total del pie de la factura a partir de
+las posiciones de las palabras del OCR, para fotos en las que estos
+datos vienen en una fila de "totales" tipo:
+
+    Subtotal | Dto | IIBB* | IVA | Detalle IVA | Total
+    6846,32  | 41315,26 | 0 | 0 | 0.00 | 156846,31
+
+En vez de "Total: 1234,56" en texto corrido (que es lo que buscan los
+regex de parser.py). Es el mismo problema que resuelve ocr_items.py
+para la tabla de ítems, pero para esta fila puntual: no hay líneas de
+tabla reales, así que ubicamos las palabras clave (Subtotal/Iva/Total)
+por posición y las emparejamos con los números de la fila de valores
+más cercana, por cercanía horizontal.
+"""
+import re
+import pytesseract
+from pytesseract import Output
+
+from ocr_items import agrupar_en_lineas
+
+# Alias que puede traer cada campo. "ubtotal" cubre el caso de que la
+# foto recorte la "S" inicial de "SUBTOTAL" (pasa si el borde de la hoja
+# queda pegado al borde de la foto).
+CAMPOS_BUSCADOS = {
+    "neto": ("neto",),
+    "subtotal": ("subtotal", "ubtotal"),
+    "iva": ("iva",),
+    "total": ("total",),
+}
+
+
+def _palabra_normalizada(texto: str) -> str:
+    return re.sub(r"[^a-záéíóúñ]", "", texto.lower())
+
+
+def _es_numero(token: str) -> bool:
+    t = token.strip()
+    return bool(re.fullmatch(r"-?[\d.]+,\d{2}", t) or re.fullmatch(r"-?\d+(\.\d+)?%?", t))
+
+
+def extraer_totales_desde_imagen(imagen, lang: str = "spa") -> dict:
+    """Devuelve un dict {campo: valor_como_texto} con lo que pudo
+    reconstruir (neto/subtotal/iva/total), o {} si no encontró nada
+    reconocible. Los valores quedan como texto (ej. '6846,32'); la
+    conversión a número la hace parser.limpiar_numero."""
+    try:
+        datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
+    except pytesseract.TesseractError:
+        datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
+
+    lineas = agrupar_en_lineas(datos)
+    if not lineas:
+        return {}
+
+    # Buscamos cada palabra clave EMPEZANDO POR EL FINAL del documento:
+    # "SUBTOTAL" también aparece como encabezado de la tabla de ítems
+    # (mucho más arriba), y nos interesa la ocurrencia del pie de
+    # factura, que es la última.
+    candidatos = []  # (campo, centro_x, top)
+    campos_ya_encontrados = set()
+    for linea in reversed(lineas):
+        for palabra in linea:
+            norm = _palabra_normalizada(palabra["texto"])
+            for campo, alias in CAMPOS_BUSCADOS.items():
+                if campo in campos_ya_encontrados:
+                    continue
+                if norm in alias:
+                    candidatos.append((campo, palabra["centro_x"], palabra["top"]))
+                    campos_ya_encontrados.add(campo)
+
+    if not candidatos:
+        return {}
+
+    candidatos.sort(key=lambda c: c[1])  # de izquierda a derecha
+    top_encabezado = max(c[2] for c in candidatos)
+
+    # La fila de valores: la primera línea DEBAJO del encabezado que
+    # tenga varios tokens que parecen números.
+    fila_valores = None
+    for linea in lineas:
+        top_linea = min(p["top"] for p in linea)
+        if top_linea <= top_encabezado:
+            continue
+        numeros = [p for p in linea if _es_numero(p["texto"])]
+        if len(numeros) >= 2:
+            fila_valores = sorted(linea, key=lambda p: p["centro_x"])
+            break
+
+    if not fila_valores:
+        return {}
+
+    bordes = [float("-inf")]
+    for (_, x1, _), (_, x2, _) in zip(candidatos, candidatos[1:]):
+        bordes.append((x1 + x2) / 2)
+    bordes.append(float("inf"))
+
+    def _campo_para(centro_x):
+        for i in range(len(candidatos)):
+            if bordes[i] <= centro_x < bordes[i + 1]:
+                return candidatos[i][0]
+        return candidatos[-1][0]
+
+    resultado = {}
+    for palabra in fila_valores:
+        if not _es_numero(palabra["texto"]):
+            continue
+        campo = _campo_para(palabra["centro_x"])
+        # Nos quedamos con el primer número que caiga en cada campo (el
+        # más cercano a su etiqueta, de izquierda a derecha), por si hay
+        # columnas intermedias (Dto, IIBB) que no nos interesan y caen
+        # en el mismo rango.
+        resultado.setdefault(campo, palabra["texto"])
+
+    return resultado

@@ -37,11 +37,16 @@ def _parsear_confianza(valor) -> int:
         return -1
 
 
-def _agrupar_en_lineas(datos: dict) -> list:
+def agrupar_en_lineas(datos: dict) -> list:
     """Agrupa las palabras de pytesseract.image_to_data en líneas, por
     cercanía vertical. No confiamos ciegamente en block/par/line_num de
     Tesseract: en zonas de tabla sin texto corrido, Tesseract puede
-    segmentar bloques de forma poco intuitiva."""
+    segmentar bloques de forma poco intuitiva. Cada línea resultante es
+    una lista de palabras ordenadas de izquierda a derecha.
+
+    Pública (sin _ adelante) porque también la usa ocr_totales.py para
+    reconstruir la fila de Subtotal/IVA/Total del pie de la factura.
+    """
     palabras = []
     n = len(datos["text"])
     for i in range(n):
@@ -107,7 +112,7 @@ def extraer_items_desde_imagen(imagen, lang: str = "spa") -> list:
     except pytesseract.TesseractError:
         datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
 
-    lineas = _agrupar_en_lineas(datos)
+    lineas = agrupar_en_lineas(datos)
     if not lineas:
         return []
 

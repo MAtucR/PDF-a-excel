@@ -74,7 +74,7 @@ HEADER_PATTERNS = {
 }
 
 
-def _clean_number(value: str):
+def limpiar_numero(value: str):
     """Convierte '13.175,99' -> 13175.99"""
     if not value:
         return None
@@ -124,7 +124,7 @@ def extraer_cabecera(texto: str) -> dict:
 
     # Post-proceso: montos a float
     for campo_monto in ("neto", "iva", "subtotal", "total"):
-        resultado[campo_monto] = _clean_number(resultado.get(campo_monto))
+        resultado[campo_monto] = limpiar_numero(resultado.get(campo_monto))
 
     # Post-proceso: normalizar fechas y condición de IVA del cliente
     for campo_fecha in ("fecha_facturacion", "vencimiento_cae"):
@@ -132,6 +132,16 @@ def extraer_cabecera(texto: str) -> dict:
     resultado["condicion_iva_cliente"] = _normalizar_condicion_iva(
         resultado.get("condicion_iva_cliente")
     )
+
+    # Fallback para vencimiento_cae: en fotos, el OCR a veces parte la
+    # palabra "Vencimiento" en dos (ej. "Vencimien" ... "to: 20260925" en
+    # puntos distintos del texto), y ningún patrón de arriba matchea.
+    # Como último recurso, buscamos una fecha de 8 dígitos pegada cerca
+    # del número de CAE ya encontrado (suelen ir juntos en el documento).
+    if not resultado.get("vencimiento_cae") and resultado.get("cae"):
+        m = re.search(re.escape(resultado["cae"]) + r"[\s\S]{0,60}?(\d{8})\b", texto)
+        if m:
+            resultado["vencimiento_cae"] = _normalizar_fecha(m.group(1))
 
     return resultado
 
@@ -213,7 +223,7 @@ def extraer_totales_tabla(pdf_path: str) -> dict:
                         for header, valor in zip(fila, valores):
                             key = _normalizar_header(header)
                             if key:
-                                resultado[key] = _clean_number((valor or "").strip())
+                                resultado[key] = limpiar_numero((valor or "").strip())
                         return resultado
     return {}
 

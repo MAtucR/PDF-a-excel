@@ -4,7 +4,7 @@ from flask import Flask, request, render_template, send_file, flash, redirect, u
 from openpyxl import Workbook, load_workbook
 import pytesseract
 
-from parser import procesar_factura
+from parser import procesar_factura, limpiar_numero
 from ocr_utils import es_imagen, convertir_imagen_a_pdf_ocr
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -90,33 +90,48 @@ def subir():
     archivo.save(ruta_original)
 
     ruta_texto_debug = None
+    items_ocr = []
+    totales_ocr = {}
 
     try:
         if es_pdf:
             ruta_pdf = ruta_original
-            items_ocr = []
         else:
             # Es una foto/imagen: primero la convertimos en un PDF con OCR
             # (imagen + texto reconocido superpuesto) y de ahí en más se
             # procesa la CABECERA exactamente igual que cualquier otro PDF.
-            # Los ÍTEMS, en cambio, se reconstruyen aparte a partir de la
-            # posición de cada palabra reconocida (ver ocr_items.py),
-            # porque una foto no tiene líneas de tabla reales.
+            # Los ÍTEMS y los TOTALES (Subtotal/IVA/Total), en cambio, se
+            # reconstruyen aparte a partir de la posición de cada palabra
+            # reconocida (ver ocr_items.py / ocr_totales.py), porque una
+            # foto no tiene líneas de tabla reales.
             nombre_base = os.path.splitext(nombre_unico)[0]
             ruta_pdf = os.path.join(UPLOAD_DIR, f"{nombre_base}_ocr.pdf")
             ruta_texto_debug = os.path.join(UPLOAD_DIR, f"{nombre_base}_texto_ocr.txt")
-            ruta_pdf, items_ocr, advertencia_ocr = convertir_imagen_a_pdf_ocr(
+            ruta_pdf, items_ocr, totales_ocr, advertencia_ocr = convertir_imagen_a_pdf_ocr(
                 ruta_original, ruta_pdf, ruta_texto_debug
             )
             if advertencia_ocr:
                 flash(advertencia_ocr)
 
         resultado = procesar_factura(ruta_pdf)
+
         if not resultado["items"] and items_ocr:
             resultado["items"] = items_ocr
 
+        for campo, valor in totales_ocr.items():
+            if resultado["cabecera"].get(campo) is None:
+                resultado["cabecera"][campo] = limpiar_numero(valor)
+
         agregar_factura_a_excel(archivo.filename, resultado)
-        campos_vacios = [k for k, v in resultado["cabecera"].items() if v is None]
+
+        # Solo avisamos de campos que realmente se escriben en el Excel
+        # (algunas claves de `cabecera` son internas/auxiliares, como
+        # condicion_iva_emisor o cliente_codigo, y no aparecen en ninguna
+        # columna, así que avisar de esas es solo ruido).
+        campos_vacios = [
+            k for k, v in resultado["cabecera"].items()
+            if v is None and k in CABECERA_COLUMNAS
+        ]
         if campos_vacios:
             mensaje = f"Factura cargada, pero no se pudieron detectar estos campos: {', '.join(campos_vacios)}"
             if ruta_texto_debug:
