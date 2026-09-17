@@ -14,11 +14,13 @@ solo un wrapper que llama a ese binario), Y el paquete de idioma
 español ('spa'). Sin el paquete de español, Tesseract reconoce el texto
 en inglés por defecto, lo cual arruina bastante la lectura de facturas
 en español (tildes, formato de números, etc.). Ver instrucciones en el
-README, sección "OCR para fotos/imágenes".
+README, sección \"OCR para fotos/imágenes\".
 """
 import json
 import re
 
+import cv2
+import numpy as np
 import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageFilter, ImageOps
@@ -45,20 +47,11 @@ def _hay_idioma_espanol() -> bool:
     try:
         return "spa" in pytesseract.get_languages(config="")
     except Exception:
-        # Versiones viejas de tesseract pueden no soportar este chequeo;
-        # asumimos que no está y dejamos que el try/except de más abajo
-        # decida en tiempo real si "spa" funciona o no.
         return False
 
 
 def _corregir_rotacion(imagen: Image.Image) -> Image.Image:
-    """Fotos guardadas/reenviadas por WhatsApp a veces pierden el
-    metadato EXIF de orientación (que es lo que usa exif_transpose para
-    enderezar la foto), y quedan de costado. Tesseract puede detectar
-    esto (OSD: orientation and script detection) sin necesitar EXIF.
-    Si falla la detección (falta el paquete de datos 'osd', imagen muy
-    chica, etc.) seguimos sin rotar, no interrumpe el flujo.
-    """
+    """Corrige rotaciones de 90/180/270 vía el OSD de Tesseract."""
     try:
         osd = pytesseract.image_to_osd(imagen)
         m = re.search(r"Rotate:\s*(\d+)", osd)
@@ -71,41 +64,13 @@ def _corregir_rotacion(imagen: Image.Image) -> Image.Image:
     return imagen
 
 
-def _preprocesar(imagen: Image.Image) -> Image.Image:
-    """Mejoras para fotos sacadas con el celular:
-
-    - respeta la orientación real según EXIF (si el metadato existe)
-    - detecta la hoja de la factura y la separa del fondo (mesa,
-      teclado, etc.), corrigiendo de paso la distorsión de perspectiva
-      (trapecio) de una foto sacada en ángulo — como el modo
-      "documento" de la cámara de un celular o un scanner (ver
-      escaner.enderezar_documento). Es best-effort y conservador: si no
-      encuentra la hoja con confianza, sigue con la foto sin tocar.
-    - detecta y corrige rotaciones de 90/180/270 que no vinieron en el
-      EXIF (fotos reenviadas por WhatsApp, por ejemplo)
-    - pasa a escala de grises
-    - sube el contraste automáticamente
-    - agranda la imagen si quedó chica, para que el OCR tenga más
-      píxeles por letra para trabajar
-    - le da un poco de nitidez (unsharp mask), para compensar fotos
-      levemente borrosas o comprimidas (WhatsApp, etc.)
-
-    NOTA: antes se había probado un deskew fino (corrección de
-    inclinaciones chicas por perfil de proyección, calculado sobre la
-    foto COMPLETA) y se revirtió porque rompía la alineación de filas
-    que necesita ocr_items.py/ocr_totales.py (un error de apenas 1°-1.5°
-    ya desplaza la columna IMPORTE respecto del SKU de una misma fila
-    20-30px, más de lo que tolera el agrupador de líneas). El
-    enderezado por perspectiva de acá arriba no tiene ese problema:
-    cuando encuentra la hoja con confianza la endereza de verdad (no
-    una aproximación), y cuando no la encuentra no toca nada — nunca
-    aplica una corrección "a medias" que pueda desalinear una foto que
-    ya estaba bien.
-    """
+def _preprocesar_base(imagen: Image.Image) -> Image.Image:
+    """Pasos comunes a las dos versiones (gris y binaria): orientación
+    EXIF, detección de hoja/perspectiva, escala de grises, corrección de
+    rotación y upscaling si es chica."""
     imagen = ImageOps.exif_transpose(imagen)
     imagen = enderezar_documento(imagen)
     imagen = imagen.convert("L")
-    imagen = ImageOps.autocontrast(imagen)
     imagen = _corregir_rotacion(imagen)
 
     if imagen.width < ANCHO_MINIMO_OCR:
@@ -113,22 +78,38 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
         nuevo_alto = int(imagen.height * factor)
         imagen = imagen.resize((ANCHO_MINIMO_OCR, nuevo_alto), Image.LANCZOS)
 
-    imagen = imagen.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-
     return imagen
 
 
+def _version_gris(base: Image.Image) -> Image.Image:
+    """Versión en escala de grises con autocontraste y nitidez.
+    Mejor para la CABECERA (textos chicos con variaciones de tono:
+    CUIT, fecha, número de factura, CAE)."""
+    gris = ImageOps.autocontrast(base)
+    gris = gris.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    return gris
+
+
+def _version_binaria(base: Image.Image) -> Image.Image:
+    """Versión binarizada con umbral adaptativo (como un scanner de
+    documentos). Cada pixel se compara contra el promedio de su
+    vecindario local, eliminando sombras y variaciones de iluminación.
+    Mejor para la TABLA DE ÍTEMS (texto alineado en columnas) y para
+    los TOTALES del pie de la factura.
+
+    block_size=31 y C=15 se calibraron probando con una foto real de
+    factura de distribuidora (Chitarroni) en las condiciones más
+    hostiles que teníamos: foto de WhatsApp a 720x1280."""
+    arr = np.array(base)
+    binaria = cv2.adaptiveThreshold(
+        arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
+    )
+    return Image.fromarray(binaria)
+
+
 def _lineas_para_debug(imagen: Image.Image, lang: str) -> list:
-    """Devuelve, para el .json de debug, el texto de cada línea que
-    detectó el agrupador por posición (ocr_items.agrupar_en_lineas), y
-    si esa línea fue reconocida como el encabezado de la tabla de
-    ítems. Sirve para diagnosticar cuándo la tabla sale vacía: si no hay
-    ninguna línea marcada como encabezado, el problema es que el OCR no
-    reconoció bien esas palabras clave (o quedaron mezcladas con otro
-    texto); si hay encabezado pero pocas o ninguna fila después, el
-    problema es el corte por salto en blanco o por "fila de totales".
-    """
-    from ocr_items import _es_linea_encabezado  # uso interno, solo para debug
+    """Texto de cada línea detectada por posición, para diagnóstico."""
+    from ocr_items import _es_linea_encabezado
     try:
         datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
     except pytesseract.TesseractError:
@@ -150,19 +131,15 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     reconstruye la tabla de ítems y la fila de totales por posición de
     palabras.
 
-    Si se pasa `ruta_texto_debug`, también guarda ahí el texto plano que
-    reconoció el OCR, y un .json hermano (mismo nombre, sufijo
-    '_items_debug.json') con los ítems/totales reconstruidos y, cuando
-    la tabla de ítems sale vacía, el detalle de cada línea que se
-    detectó por posición (ver _lineas_para_debug) para diagnosticar por
-    qué sin adivinar.
+    ENFOQUE DUAL: genera dos versiones de la imagen preprocesada — una
+    en escala de grises (mejor para cabecera) y otra binarizada con
+    umbral adaptativo tipo scanner (mejor para tabla de ítems y totales)
+    — y corre el OCR sobre ambas. El texto de las dos versiones se
+    concatena para los regex de cabecera (el primero que matchee gana),
+    y los ítems/totales se extraen de la versión binarizada que
+    reconstruye mejor las posiciones de columna.
 
-    Devuelve una tupla (ruta_pdf, items, totales, advertencia):
-    - items: lista de dicts con los ítems reconstruidos (puede ser []).
-    - totales: dict {neto/subtotal/iva/total: valor_texto} (puede ser {}).
-    - advertencia: None si todo salió bien, o un mensaje para mostrarle
-      al usuario si el reconocimiento corrió en inglés por faltar el
-      paquete de idioma español.
+    Devuelve una tupla (ruta_pdf, items, totales, advertencia).
     """
     advertencia = None
     idioma = "spa" if _hay_idioma_espanol() else None
@@ -178,18 +155,21 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         )
 
     with Image.open(ruta_imagen) as imagen_original:
-        imagen = _preprocesar(imagen_original)
+        base = _preprocesar_base(imagen_original)
+        gris = _version_gris(base)
+        binaria = _version_binaria(base)
         lang_usado = idioma or "eng"
 
+        # --- OCR sobre la versión GRIS (mejor para cabecera) ---
         try:
             pdf_bytes = pytesseract.image_to_pdf_or_hocr(
-                imagen, extension="pdf", lang=lang_usado
+                gris, extension="pdf", lang=lang_usado
             )
-            texto = pytesseract.image_to_string(imagen, lang=lang_usado)
+            texto_gris = pytesseract.image_to_string(gris, lang=lang_usado)
         except pytesseract.TesseractError:
             lang_usado = None
-            pdf_bytes = pytesseract.image_to_pdf_or_hocr(imagen, extension="pdf")
-            texto = pytesseract.image_to_string(imagen)
+            pdf_bytes = pytesseract.image_to_pdf_or_hocr(gris, extension="pdf")
+            texto_gris = pytesseract.image_to_string(gris)
             if advertencia is None:
                 advertencia = (
                     "No se pudo usar el idioma español para el OCR (revisá "
@@ -197,23 +177,46 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
                     "defecto de Tesseract."
                 )
 
+        # --- OCR sobre la versión BINARIZADA (mejor para ítems/totales) ---
         try:
-            items = extraer_items_desde_imagen(imagen, lang=lang_usado or "eng")
+            texto_bin = pytesseract.image_to_string(binaria, lang=lang_usado or "eng")
+        except pytesseract.TesseractError:
+            texto_bin = pytesseract.image_to_string(binaria)
+
+        # Texto combinado: las dos versiones concatenadas. Los regex de
+        # cabecera (parser.extraer_cabecera) agarran la primera
+        # ocurrencia que matchee — así se benefician de ambas versiones
+        # sin riesgo de conflicto.
+        texto = texto_gris + "\n" + texto_bin
+
+        # --- Ítems y totales desde la versión BINARIZADA ---
+        try:
+            items = extraer_items_desde_imagen(binaria, lang=lang_usado or "eng")
         except Exception:
-            # La reconstrucción de ítems/totales es un heurístico
-            # best-effort: si falla, seguimos con la cabecera igual (no
-            # interrumpe el flujo).
             items = []
 
+        # Fallback: si la binarizada no encontró ítems, probar con la gris
+        if not items:
+            try:
+                items = extraer_items_desde_imagen(gris, lang=lang_usado or "eng")
+            except Exception:
+                items = []
+
         try:
-            totales = extraer_totales_desde_imagen(imagen, lang=lang_usado or "eng")
+            totales = extraer_totales_desde_imagen(binaria, lang=lang_usado or "eng")
         except Exception:
             totales = {}
+
+        if not totales:
+            try:
+                totales = extraer_totales_desde_imagen(gris, lang=lang_usado or "eng")
+            except Exception:
+                totales = {}
 
         lineas_debug = None
         if ruta_texto_debug and not items:
             try:
-                lineas_debug = _lineas_para_debug(imagen, lang_usado or "eng")
+                lineas_debug = _lineas_para_debug(binaria, lang_usado or "eng")
             except Exception:
                 lineas_debug = None
 
