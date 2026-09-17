@@ -24,6 +24,10 @@ HEADER_PATTERNS = {
         # Facturas pre-impresas de distribuidoras: la letra viene en un
         # recuadro que el OCR a veces lee ANTES que la palabra.
         r"\b([ABCR])\b[\s\S]{0,40}?\b(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\b",
+        # Si no aparece la letra cerca (el recuadro quedó lejos en el
+        # diseño, o el OCR no la captó ahí), al menos guardamos la
+        # palabra del tipo de comprobante.
+        r"\b(FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\b",
     ],
     "numero_factura": [
         r"(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\s+[ABCR]\s+([\d\-]{5,20})",
@@ -40,7 +44,9 @@ HEADER_PATTERNS = {
         r"\bFECHA\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
     ],
     "cuit_emisor": [
-        r"C\.?U\.?I\.?T\.?\s*:?\s*(\d{2}[-\s]?\d{8}[-\s]?\d{1})",
+        # Acepta ":" o ";" como separador (el OCR a veces confunde uno
+        # con el otro).
+        r"C\.?U\.?I\.?T\.?\s*[:;]?\s*(\d{2}[-\s]?\d{8}[-\s]?\d{1})",
     ],
     "condicion_iva_emisor": [
         r"(Responsable Inscripto|Monotributista|Exento|Consumidor Final)",
@@ -50,10 +56,10 @@ HEADER_PATTERNS = {
         r"Sres\.?\s*:?\s*(.+)",
     ],
     "cuit_cliente": [
-        r"CUIT\s*:?\s*(\d{2}[-\s]?\d{8}[-\s]?\d{1})(?!.*C\.U\.I\.T)",
+        r"CUIT\s*[:;]?\s*(\d{2}[-\s]?\d{8}[-\s]?\d{1})(?!.*C\.U\.I\.T)",
         # Algunos comprobantes de consumidor final ponen un código más
         # corto (no un CUIT completo de 11 dígitos) bajo la misma etiqueta.
-        r"CUIT\s*:?\s*(\d{6,11})(?!.*C\.U\.I\.T)",
+        r"CUIT\s*[:;]?\s*(\d{6,11})(?!.*C\.U\.I\.T)",
     ],
     "cliente_codigo": [
         r"Cliente\s*:?\s*(\d{3,})",
@@ -154,6 +160,43 @@ def _normalizar_condicion_iva(valor):
     return valor.strip()
 
 
+def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_cliente, patron_valor_tpl):
+    """Cuando el emisor y el cliente terminan con el MISMO valor para un
+    campo (CUIT, condición de IVA), casi siempre es porque el texto solo
+    tenía UNA sola ocurrencia reconocible de la etiqueta y ambos patrones
+    (el genérico de emisor y el de cliente) cayeron sobre ella — el dato
+    de la OTRA parte simplemente no se pudo leer del todo en esta foto.
+
+    En vez de mostrar el mismo valor para los dos con confianza pudiendo
+    estar mal, usamos la posición de esa única ocurrencia respecto de
+    dónde empieza la información del cliente (ancla: su razón social)
+    para decidir a quién pertenece de verdad: si aparece ANTES, es del
+    emisor; si aparece DESPUÉS, es del cliente. Si no hay forma de
+    saberlo (no se encontró la razón social del cliente), preferimos
+    anular los dos antes que arriesgarnos a mostrar el equivocado.
+    """
+    if not resultado.get(campo_emisor) or resultado.get(campo_emisor) != resultado.get(campo_cliente):
+        return
+
+    valor = resultado[campo_emisor]
+    razon_match = None
+    for patron in HEADER_PATTERNS["razon_social_cliente"]:
+        razon_match = re.search(patron, texto, re.IGNORECASE)
+        if razon_match:
+            break
+
+    ocurrencia = re.search(patron_valor_tpl.format(valor=re.escape(valor)), texto, re.IGNORECASE)
+
+    if razon_match and ocurrencia:
+        if ocurrencia.start() < razon_match.start():
+            resultado[campo_cliente] = None
+        else:
+            resultado[campo_emisor] = None
+    else:
+        resultado[campo_emisor] = None
+        resultado[campo_cliente] = None
+
+
 def extraer_cabecera(texto: str) -> dict:
     resultado = {}
     for campo, patrones in HEADER_PATTERNS.items():
@@ -189,18 +232,15 @@ def extraer_cabecera(texto: str) -> dict:
         if m:
             resultado["vencimiento_cae"] = _normalizar_fecha(m.group(1))
 
-    # Salvavidas: si emisor y cliente terminaron con el MISMO CUIT, es
-    # casi seguro un choque (el CUIT real de una de las dos partes no se
-    # pudo leer del texto, y el patrón genérico terminó usando el único
-    # "CUIT:" que sí encontró para ambos campos). Dos partes de una
-    # factura prácticamente nunca comparten CUIT, así que preferimos
-    # anular los dos antes que mostrar uno con confianza estando mal.
-    if (
-        resultado.get("cuit_emisor")
-        and resultado.get("cuit_emisor") == resultado.get("cuit_cliente")
-    ):
-        resultado["cuit_emisor"] = None
-        resultado["cuit_cliente"] = None
+    # Desambiguar (o anular con seguridad) los choques emisor/cliente.
+    _resolver_colision_emisor_cliente(
+        resultado, texto, "cuit_emisor", "cuit_cliente",
+        r"C\.?U\.?I\.?T\.?\s*[:;]?\s*{valor}",
+    )
+    _resolver_colision_emisor_cliente(
+        resultado, texto, "condicion_iva_emisor", "condicion_iva_cliente",
+        r"IVA\s*:?\s*{valor}",
+    )
 
     return resultado
 
@@ -214,7 +254,7 @@ def extraer_cabecera(texto: str) -> dict:
 # fotos (a partir de palabras sueltas reconocidas por OCR).
 ITEM_HEADER_HINTS = ["sku", "codigo", "código", "descripcion", "descripción",
                      "cantidad", "cant", "unitario", "precio", "subtotal", "iva",
-                     "importe"]
+                     "importe", "neto", "dto"]
 
 
 def _fila_es_encabezado(fila: list) -> bool:
@@ -301,13 +341,15 @@ def _normalizar_header(nombre: str):
         # Facturas pre-impresas de distribuidoras suelen tener una sola
         # columna "Precio" (sin la palabra "unitario") y "Dto" en vez de
         # "Descuento"; otras usan "Importe" para el total de la línea en
-        # vez de "Subtotal".
+        # vez de "Subtotal", o "Precio Neto" en remitos con impuestos
+        # discriminados aparte.
         "precio": "precio_unitario",
+        "precio neto": "precio_unitario",
         "descuento": "descuento", "dto": "descuento",
         "neto": "neto",
         "interno": "interno", "internos": "interno",
         "iva": "iva",
-        "subtotal": "subtotal", "importe": "subtotal",
+        "subtotal": "subtotal", "importe": "subtotal", "total neto": "subtotal",
     }
     return mapa.get(n, n.replace(" ", "_"))
 
