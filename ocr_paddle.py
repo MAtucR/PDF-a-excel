@@ -54,6 +54,29 @@ def disponible() -> bool:
         return False
 
 
+def _inferencia_de_prueba(ocr):
+    """Corre una inferencia minima sobre una imagen sintetica para
+    verificar que esta configuracion REALMENTE funciona.
+
+    Hace falta porque PaddleOCR puede construirse sin errores y recien
+    explotar al inferir (pasa con el backend oneDNN de paddlepaddle
+    3.3.x). Sin esta validacion elegiriamos una configuracion rota, y el
+    fallo aparecería recién al procesar una factura de verdad.
+
+    Devuelve (True, None) si anduvo, o (False, excepcion) si no.
+    """
+    try:
+        imagen = np.full((80, 400, 3), 255, dtype=np.uint8)
+        imagen[30:50, 20:380] = 0  # una banda negra, suficiente para ejercitar el grafo
+        if hasattr(ocr, "predict"):
+            ocr.predict(imagen)
+        else:
+            ocr.ocr(imagen)
+        return True, None
+    except Exception as e:
+        return False, e
+
+
 def _obtener_ocr(lang: str = "es"):
     """Devuelve la instancia de PaddleOCR, creándola la primera vez.
     Si la creación falla (falta el paquete, no pudo bajar los modelos,
@@ -72,11 +95,28 @@ def _obtener_ocr(lang: str = "es"):
         _ULTIMO_ERROR = f"no se pudo importar paddleocr ({type(e).__name__}: {e})"
         return None
 
-    # El nombre de los parametros cambio entre versiones de PaddleOCR
-    # (2.x usa use_angle_cls, 3.x usa use_textline_orientation) y ademas
-    # el idioma puede no estar disponible. Probamos de mas especifico a
-    # mas generico y nos quedamos con la primera forma que construya.
+    # Probamos varias configuraciones y nos quedamos con la primera que
+    # ademas de CONSTRUIR pueda correr una inferencia de prueba (ver
+    # _inferencia_de_prueba). Los dos motivos por los que hace falta
+    # probar varias:
+    #
+    # 1. El nombre de los parametros cambio entre versiones de PaddleOCR
+    #    (2.x usa use_angle_cls, 3.x usa use_textline_orientation).
+    #
+    # 2. Con paddlepaddle 3.3.x en Windows, el backend oneDNN (MKLDNN)
+    #    rompe la inferencia con:
+    #       NotImplementedError: ConvertPirAttribute2RuntimeAttribute
+    #       not support [pir::ArrayAttribute<pir::DoubleAttribute>]
+    #    y el error aparece SOLO al inferir: el constructor devuelve un
+    #    objeto aparentemente sano. Por eso las variantes con
+    #    enable_mkldnn=False van primero, y por eso validamos con una
+    #    inferencia real antes de dar por buena una configuracion.
+    #    (Verificado con diagnostico_paddle2.py sobre paddleocr 3.7.0 +
+    #    paddlepaddle 3.3.1 en Windows: sin oneDNN anda, con oneDNN no.)
     intentos = [
+        dict(lang=lang, use_textline_orientation=True, enable_mkldnn=False),
+        dict(lang=lang, use_angle_cls=True, enable_mkldnn=False),
+        dict(lang=lang, enable_mkldnn=False),
         dict(lang=lang, use_textline_orientation=True),
         dict(lang=lang, use_angle_cls=True),
         dict(lang=lang),
@@ -85,15 +125,28 @@ def _obtener_ocr(lang: str = "es"):
     ultimo = None
     for kwargs in intentos:
         try:
-            _OCR = PaddleOCR(**kwargs)
-            _ULTIMO_ERROR = None
-            return _OCR
+            candidato = PaddleOCR(**kwargs)
         except Exception as e:
             ultimo = e
+            continue
+
+        ok, error_inferencia = _inferencia_de_prueba(candidato)
+        if ok:
+            _OCR = candidato
+            _ULTIMO_ERROR = None
+            return _OCR
+        ultimo = error_inferencia
 
     _INTENTO_FALLIDO = True
     detalle = str(ultimo).split("\n")[0][:200] if ultimo else "motivo desconocido"
-    if "hosting" in detalle.lower() or "network" in detalle.lower() or "connect" in detalle.lower():
+    if "ConvertPirAttribute" in detalle or "onednn" in detalle.lower():
+        _ULTIMO_ERROR = (
+            "PaddleOCR no puede inferir en esta maquina: el backend oneDNN de "
+            "paddlepaddle rompe el grafo, y desactivarlo tampoco alcanzo. "
+            f"Detalle: {detalle}. Probar 'pip install paddlepaddle==3.0.0' o "
+            "correr diagnostico_paddle2.py."
+        )
+    elif "hosting" in detalle.lower() or "network" in detalle.lower() or "connect" in detalle.lower():
         _ULTIMO_ERROR = (
             "PaddleOCR no pudo descargar sus modelos (hace falta internet "
             f"la primera vez). Detalle: {detalle}"
