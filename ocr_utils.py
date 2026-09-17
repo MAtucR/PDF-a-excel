@@ -14,9 +14,14 @@ solo un wrapper que llama a ese binario), Y el paquete de idioma
 español ('spa'). Sin el paquete de español, Tesseract reconoce el texto
 en inglés por defecto, lo cual arruina bastante la lectura de facturas
 en español (tildes, formato de números, etc.). Ver instrucciones en el
-README, sección \"OCR para fotos/imágenes\".
+README, sección "OCR para fotos/imágenes".
+
+Opcionalmente puede usar PaddleOCR como motor principal (ver
+ocr_paddle.py), que suele leer mejor fotos de baja resolución. Si no
+está instalado o no arranca, todo sigue funcionando con Tesseract.
 """
 import json
+import os
 import re
 
 import cv2
@@ -26,6 +31,7 @@ from pytesseract import Output
 from PIL import Image, ImageFilter, ImageOps
 
 from escaner import enderezar_documento
+import ocr_paddle
 from ocr_items import extraer_items_desde_imagen, agrupar_en_lineas
 from ocr_totales import extraer_totales_desde_imagen
 
@@ -37,6 +43,23 @@ EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 # suelen quedar con poca resolución efectiva sobre las letras, y eso
 # arruina el reconocimiento.
 ANCHO_MINIMO_OCR = 2200
+
+# Motor de OCR a usar para fotos. Se puede cambiar con la variable de
+# entorno MOTOR_OCR:
+#   "auto"      (default) usa PaddleOCR si está instalado, si no Tesseract
+#   "paddle"    fuerza PaddleOCR (si falla, cae igual a Tesseract)
+#   "tesseract" fuerza Tesseract (comportamiento histórico)
+# PaddleOCR suele leer bastante mejor fotos de baja resolución
+# (WhatsApp), pero Tesseract sigue siendo el fallback siempre disponible.
+MOTOR_OCR = os.environ.get("MOTOR_OCR", "auto").lower()
+
+
+def _usar_paddle() -> bool:
+    if MOTOR_OCR == "tesseract":
+        return False
+    if MOTOR_OCR in ("paddle", "auto"):
+        return ocr_paddle.disponible()
+    return False
 
 
 def es_imagen(nombre_archivo: str) -> bool:
@@ -131,13 +154,13 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     reconstruye la tabla de ítems y la fila de totales por posición de
     palabras.
 
-    ENFOQUE DUAL: genera dos versiones de la imagen preprocesada — una
-    en escala de grises (mejor para cabecera) y otra binarizada con
-    umbral adaptativo tipo scanner (mejor para tabla de ítems y totales)
-    — y corre el OCR sobre ambas. El texto de las dos versiones se
-    concatena para los regex de cabecera (el primero que matchee gana),
-    y los ítems/totales se extraen de la versión binarizada que
-    reconstruye mejor las posiciones de columna.
+    ENFOQUE MULTI-MOTOR: genera dos versiones de la imagen preprocesada
+    — una en escala de grises (mejor para cabecera) y otra binarizada
+    con umbral adaptativo tipo scanner (mejor para tabla de ítems y
+    totales) — y corre Tesseract sobre ambas. Si PaddleOCR está
+    disponible, también corre sobre la versión gris y sus resultados
+    tienen prioridad. El texto de todas las versiones se concatena para
+    los regex de cabecera (el primero que matchee gana).
 
     Devuelve una tupla (ruta_pdf, items, totales, advertencia).
     """
@@ -183,29 +206,82 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         except pytesseract.TesseractError:
             texto_bin = pytesseract.image_to_string(binaria)
 
-        # Texto combinado: las dos versiones concatenadas. Los regex de
-        # cabecera (parser.extraer_cabecera) agarran la primera
-        # ocurrencia que matchee — así se benefician de ambas versiones
-        # sin riesgo de conflicto.
-        texto = texto_gris + "\n" + texto_bin
+        # --- OCR con PaddleOCR, si está disponible ---
+        # PaddleOCR trabaja mejor sobre la imagen en GRIS/color que sobre
+        # la binarizada: sus modelos fueron entrenados con fotos reales,
+        # así que la binarización le saca información en vez de ayudarlo
+        # (al revés que Tesseract).
+        datos_paddle = None
+        texto_paddle = ""
+        if _usar_paddle():
+            try:
+                datos_paddle = ocr_paddle.datos_estilo_tesseract(gris)
+                if datos_paddle and datos_paddle.get("text"):
+                    texto_paddle = ocr_paddle.texto_plano(gris)
+                else:
+                    datos_paddle = None
+            except Exception:
+                datos_paddle = None
+                texto_paddle = ""
 
-        # --- Ítems y totales desde la versión BINARIZADA ---
-        try:
-            items = extraer_items_desde_imagen(binaria, lang=lang_usado or "eng")
-        except Exception:
-            items = []
+            # Si paddleocr esta instalado pero no se pudo usar, avisamos:
+            # sin esto el fallback a Tesseract es invisible y uno cree que
+            # esta usando Paddle cuando en realidad no.
+            if datos_paddle is None:
+                motivo = ocr_paddle.motivo_fallo() or "motivo desconocido"
+                aviso = (
+                    f"paddleocr esta instalado pero no se pudo usar, se proceso "
+                    f"con Tesseract. {motivo} "
+                    f"(corre 'python diagnostico_paddle.py' para mas detalle)"
+                )
+                advertencia = f"{advertencia} | {aviso}" if advertencia else aviso
 
-        # Fallback: si la binarizada no encontró ítems, probar con la gris
+        # Texto combinado: las versiones de Tesseract (gris + binarizada)
+        # más la de PaddleOCR si corrió. Los regex de cabecera
+        # (parser.extraer_cabecera) agarran la primera ocurrencia que
+        # matchee — así se benefician de todas las versiones sin riesgo
+        # de conflicto. Paddle va primero por ser el más confiable en
+        # fotos de baja resolución.
+        partes = [p for p in (texto_paddle, texto_gris, texto_bin) if p]
+        texto = "\n".join(partes)
+
+        # --- Ítems: primero Paddle (si corrió), después Tesseract ---
+        items = []
+        if datos_paddle:
+            try:
+                items = extraer_items_desde_imagen(
+                    gris, lang=lang_usado or "eng", datos=datos_paddle
+                )
+            except Exception:
+                items = []
+
+        if not items:
+            try:
+                items = extraer_items_desde_imagen(binaria, lang=lang_usado or "eng")
+            except Exception:
+                items = []
+
         if not items:
             try:
                 items = extraer_items_desde_imagen(gris, lang=lang_usado or "eng")
             except Exception:
                 items = []
 
-        try:
-            totales = extraer_totales_desde_imagen(binaria, lang=lang_usado or "eng")
-        except Exception:
-            totales = {}
+        # --- Totales: mismo orden de preferencia ---
+        totales = {}
+        if datos_paddle:
+            try:
+                totales = extraer_totales_desde_imagen(
+                    gris, lang=lang_usado or "eng", datos=datos_paddle
+                )
+            except Exception:
+                totales = {}
+
+        if not totales:
+            try:
+                totales = extraer_totales_desde_imagen(binaria, lang=lang_usado or "eng")
+            except Exception:
+                totales = {}
 
         if not totales:
             try:
@@ -228,7 +304,11 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
             f.write(texto)
         try:
             ruta_items_debug = ruta_texto_debug.replace("_texto_ocr.txt", "_items_debug.json")
-            contenido_debug = {"items": items, "totales": totales}
+            contenido_debug = {
+                "items": items,
+                "totales": totales,
+                "motor_usado": "paddleocr" if datos_paddle else "tesseract",
+            }
             if lineas_debug is not None:
                 contenido_debug["lineas_detectadas"] = lineas_debug
             with open(ruta_items_debug, "w", encoding="utf-8") as f:
