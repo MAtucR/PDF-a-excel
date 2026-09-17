@@ -90,6 +90,7 @@ def subir():
     archivo.save(ruta_original)
 
     ruta_texto_debug = None
+    ruta_items_debug = None
     items_ocr = []
     totales_ocr = {}
 
@@ -107,6 +108,7 @@ def subir():
             nombre_base = os.path.splitext(nombre_unico)[0]
             ruta_pdf = os.path.join(UPLOAD_DIR, f"{nombre_base}_ocr.pdf")
             ruta_texto_debug = os.path.join(UPLOAD_DIR, f"{nombre_base}_texto_ocr.txt")
+            ruta_items_debug = os.path.join(UPLOAD_DIR, f"{nombre_base}_items_debug.json")
             ruta_pdf, items_ocr, totales_ocr, advertencia_ocr = convertir_imagen_a_pdf_ocr(
                 ruta_original, ruta_pdf, ruta_texto_debug
             )
@@ -132,10 +134,23 @@ def subir():
             k for k, v in resultado["cabecera"].items()
             if v is None and k in CABECERA_COLUMNAS
         ]
+        mensajes_extra = []
         if campos_vacios:
-            mensaje = f"Factura cargada, pero no se pudieron detectar estos campos: {', '.join(campos_vacios)}"
+            mensajes_extra.append(
+                f"no se pudieron detectar estos campos: {', '.join(campos_vacios)}"
+            )
+        if ruta_items_debug and not resultado["items"]:
+            mensajes_extra.append("no se detectó la tabla de ítems")
+
+        if mensajes_extra:
+            mensaje = f"Factura cargada, pero {'; '.join(mensajes_extra)}."
             if ruta_texto_debug:
-                mensaje += f". Podés revisar qué reconoció el OCR en uploads/{os.path.basename(ruta_texto_debug)}."
+                mensaje += (
+                    f" Podés revisar qué reconoció el OCR en "
+                    f"uploads/{os.path.basename(ruta_texto_debug)} "
+                    f"y el detalle de ítems/totales reconstruidos en "
+                    f"uploads/{os.path.basename(ruta_items_debug)}."
+                )
             flash(mensaje)
         else:
             flash(f"Factura '{archivo.filename}' procesada correctamente ({len(resultado['items'])} ítems detectados).")
