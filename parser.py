@@ -32,11 +32,12 @@ HEADER_PATTERNS = {
     "numero_factura": [
         r"(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\s+[ABCR]\s+([\d\-]{5,20})",
         # Formato "0003-01084580" (punto de venta de 4 dígitos + número
-        # de 7/8), sin el tipo pegado justo adelante.
-        r"\b(\d{4}-\d{7,8})\b",
+        # de 7/8), tolerando espacios sueltos alrededor del guión (pasa
+        # cuando el OCR mete un espacio de más ahí, ej. "0011 -00016528").
+        r"\b(\d{4}\s*-\s*\d{7,8})\b",
         # Otros formatos con distinta cantidad de dígitos a cada lado del
         # guión (ej. remitos: "90099-00004158").
-        r"\b(\d{3,6}-\d{6,9})\b",
+        r"\b(\d{3,6}\s*-\s*\d{6,9})\b",
     ],
     "fecha_facturacion": [
         r"Fecha\s*(?:de\s*)?facturaci[oó]n\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
@@ -70,6 +71,10 @@ HEADER_PATTERNS = {
         # etiqueta genérica "IVA", lo que confundiría al patrón genérico
         # de abajo si se probara primero).
         r"Condici[oó]n(?:\s+de)?\s+IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
+        # "CLIENTE CONSUMIDOR FINAL" (facturas donde el campo "Cliente"
+        # muestra directamente la categoría fiscal en vez de un nombre,
+        # típico en ventas a consumidor final anónimo).
+        r"CLIENTE\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(CONS\.?\s*FINAL)",
         # Algunas facturas pre-impresas ponen la condición del cliente
@@ -105,6 +110,9 @@ HEADER_PATTERNS = {
         # "Vto C.A.E.: 25/09/2026" (abreviatura común en facturas prolijas,
         # con o sin puntos entre las letras de CAE).
         r"Vto\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
+        # "VENC. CAE: 26/09/2026" (otra abreviatura común, "Vencimiento"
+        # acortado a "Venc." en vez de "Vto.").
+        r"VENC\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
     ],
     "punto_venta": [r"\b(\d{4})-\d{7,8}\b"],
 }
@@ -170,7 +178,8 @@ def _normalizar_condicion_iva(valor):
     return v.upper() if v.upper() == "MONOTRIBUTO" else valor.strip()
 
 
-def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_cliente, patron_valor_tpl):
+def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_cliente,
+                                       patron_valor_tpl, valores_siempre_cliente=None):
     """Cuando el emisor y el cliente terminan con el MISMO valor para un
     campo (CUIT, condición de IVA), casi siempre es porque el texto solo
     tenía UNA sola ocurrencia reconocible de la etiqueta y ambos patrones
@@ -178,17 +187,32 @@ def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_clie
     de la OTRA parte simplemente no se pudo leer del todo en esta foto.
 
     En vez de mostrar el mismo valor para los dos con confianza pudiendo
-    estar mal, usamos la posición de esa única ocurrencia respecto de
-    dónde empieza la información del cliente (ancla: su razón social)
-    para decidir a quién pertenece de verdad: si aparece ANTES, es del
-    emisor; si aparece DESPUÉS, es del cliente. Si no hay forma de
-    saberlo (no se encontró la razón social del cliente), preferimos
-    anular los dos antes que arriesgarnos a mostrar el equivocado.
+    estar mal, decidimos a quién pertenece de verdad en este orden:
+
+    1. Si el valor en sí mismo ya lo delata (ej. "Consumidor Final" es
+       una categoría que solo tiene sentido para un CLIENTE; ningún
+       emisor que factura se declara a sí mismo así), se lo asignamos
+       directo sin mirar posiciones.
+    2. Si encontramos dónde empieza la información del cliente (ancla:
+       su razón social), comparamos la posición de la única ocurrencia
+       contra esa ancla: antes es del emisor, después es del cliente.
+    3. Si el texto menciona "Consumidor Final" en alguna parte (venta a
+       consumidor anónimo, sin nombre de cliente que sirva de ancla),
+       asumimos que el único dato reconocido es el del EMISOR — toda
+       factura tiene uno, mientras que un consumidor final anónimo
+       generalmente no aporta uno propio.
+    4. Si no hay ninguna pista, preferimos anular los dos antes que
+       arriesgarnos a mostrar el equivocado.
     """
     if not resultado.get(campo_emisor) or resultado.get(campo_emisor) != resultado.get(campo_cliente):
         return
 
     valor = resultado[campo_emisor]
+
+    if valores_siempre_cliente and valor.strip().upper() in valores_siempre_cliente:
+        resultado[campo_emisor] = None
+        return
+
     razon_match = None
     for patron in HEADER_PATTERNS["razon_social_cliente"]:
         razon_match = re.search(patron, texto, re.IGNORECASE)
@@ -202,6 +226,8 @@ def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_clie
             resultado[campo_cliente] = None
         else:
             resultado[campo_emisor] = None
+    elif ocurrencia and re.search(r"\bCONSUMIDOR\s+FINAL\b", texto, re.IGNORECASE):
+        resultado[campo_cliente] = None
     else:
         resultado[campo_emisor] = None
         resultado[campo_cliente] = None
@@ -220,6 +246,11 @@ def extraer_cabecera(texto: str) -> dict:
                 valor = m.group(m.lastindex).strip()
                 break
         resultado[campo] = valor
+
+    # Post-proceso: limpiar espacios sueltos que a veces mete el OCR
+    # alrededor del guión del número de comprobante.
+    if resultado.get("numero_factura"):
+        resultado["numero_factura"] = re.sub(r"\s+", "", resultado["numero_factura"])
 
     # Post-proceso: montos a float
     for campo_monto in ("neto", "iva", "subtotal", "total"):
@@ -250,6 +281,9 @@ def extraer_cabecera(texto: str) -> dict:
     _resolver_colision_emisor_cliente(
         resultado, texto, "condicion_iva_emisor", "condicion_iva_cliente",
         r"IVA\s*:?\s*{valor}",
+        # "Consumidor Final" solo tiene sentido para un cliente; nunca
+        # para el emisor que factura.
+        valores_siempre_cliente={"CONSUMIDOR FINAL"},
     )
 
     return resultado

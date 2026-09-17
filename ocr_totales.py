@@ -64,21 +64,30 @@ def extraer_totales_desde_imagen(imagen, lang: str = "spa") -> dict:
     if not lineas:
         return {}
 
-    # Buscamos cada palabra clave EMPEZANDO POR EL FINAL del documento:
-    # "SUBTOTAL" también aparece como encabezado de la tabla de ítems
-    # (mucho más arriba), y nos interesa la ocurrencia del pie de
-    # factura, que es la última.
+    # Buscamos cada palabra clave EMPEZANDO POR EL FINAL del documento y
+    # de derecha a izquierda dentro de cada línea: "SUBTOTAL" también
+    # aparece como encabezado de la tabla de ítems (mucho más arriba), y
+    # algunas facturas repiten la palabra "TOTAL" DOS VECES en la misma
+    # fila de encabezado (ej. "TOTAL NETO ... IMP. INT TOTAL", donde la
+    # primera es parte de un rótulo compuesto y la segunda es la columna
+    # real). Recorriendo todo el documento de atrás para adelante —
+    # tanto línea por línea como palabra por palabra dentro de cada
+    # línea — nos quedamos siempre con la ocurrencia más a la derecha y
+    # más abajo, que es la que realmente encabeza la columna de valores.
+    palabras_en_orden_inverso = [
+        palabra for linea in reversed(lineas) for palabra in reversed(linea)
+    ]
+
     candidatos = []  # (campo, centro_x, top)
     campos_ya_encontrados = set()
-    for linea in reversed(lineas):
-        for palabra in linea:
-            if len(campos_ya_encontrados) == 4:
-                break
-            norm = _palabra_normalizada(palabra["texto"])
-            campo = _campo_de_palabra(norm)
-            if campo and campo not in campos_ya_encontrados:
-                candidatos.append((campo, palabra["centro_x"], palabra["top"]))
-                campos_ya_encontrados.add(campo)
+    for palabra in palabras_en_orden_inverso:
+        if len(campos_ya_encontrados) == 4:
+            break
+        norm = _palabra_normalizada(palabra["texto"])
+        campo = _campo_de_palabra(norm)
+        if campo and campo not in campos_ya_encontrados:
+            candidatos.append((campo, palabra["centro_x"], palabra["top"]))
+            campos_ya_encontrados.add(campo)
 
     if not candidatos:
         return {}
