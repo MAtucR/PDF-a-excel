@@ -50,15 +50,20 @@ def _es_numero(token: str) -> bool:
     return bool(re.fullmatch(r"-?[\d.]+,\d{2}", t) or re.fullmatch(r"-?\d+(\.\d+)?%?", t))
 
 
-def extraer_totales_desde_imagen(imagen, lang: str = "spa") -> dict:
+def extraer_totales_desde_imagen(imagen, lang: str = "spa", datos: dict = None) -> dict:
     """Devuelve un dict {campo: valor_como_texto} con lo que pudo
     reconstruir (neto/subtotal/iva/total), o {} si no encontró nada
     reconocible. Los valores quedan como texto (ej. '6846,32'); la
-    conversión a número la hace parser.limpiar_numero."""
-    try:
-        datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
-    except pytesseract.TesseractError:
-        datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
+    conversión a número la hace parser.limpiar_numero.
+
+    `datos` permite pasar las posiciones de palabras ya calculadas por
+    otro motor de OCR (ver ocr_paddle.datos_estilo_tesseract); si es
+    None se corre Tesseract sobre `imagen` como siempre."""
+    if datos is None:
+        try:
+            datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
+        except pytesseract.TesseractError:
+            datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
 
     lineas = agrupar_en_lineas(datos)
     if not lineas:

@@ -1,10 +1,10 @@
 """
 Reconstruye la tabla de ítems de una factura a partir de las posiciones
-de cada palabra que devuelve Tesseract (pytesseract.image_to_data), para
-los casos en los que la imagen NO tiene líneas de tabla reales (fotos de
-facturas) y por lo tanto pdfplumber.extract_tables() no encuentra nada
-(esa función necesita bordes/líneas vectoriales dibujadas en el PDF, y
-una foto sólo tiene píxeles).
+de cada palabra que devuelve el motor de OCR, para los casos en los que
+la imagen NO tiene líneas de tabla reales (fotos de facturas) y por lo
+tanto pdfplumber.extract_tables() no encuentra nada (esa función
+necesita bordes/líneas vectoriales dibujadas en el PDF, y una foto sólo
+tiene píxeles).
 
 Es un enfoque heurístico "por columnas":
 1. Agrupa las palabras reconocidas en líneas, por cercanía vertical.
@@ -52,8 +52,9 @@ def agrupar_en_lineas(datos: dict) -> list:
     gigante — justamente el bug que hacía que la tabla de ítems se
     reconstruyera mal.
 
-    Pública (sin _ adelante) porque también la usa ocr_totales.py para
-    reconstruir la fila de Subtotal/IVA/Total del pie de la factura.
+    Pública (sin _ adelante) porque también la usan ocr_totales.py (para
+    reconstruir la fila de Subtotal/IVA/Total del pie) y ocr_paddle.py
+    (para armar el texto plano a partir de las regiones detectadas).
     """
     palabras = []
     n = len(datos["text"])
@@ -111,15 +112,21 @@ def _es_linea_totales(linea: list) -> bool:
     return "total" in texto and not primera_es_numero
 
 
-def extraer_items_desde_imagen(imagen, lang: str = "spa") -> list:
+def extraer_items_desde_imagen(imagen, lang: str = "spa", datos: dict = None) -> list:
     """Devuelve una lista de dicts {columna: valor}, con la mejor
     reconstrucción posible de la tabla de ítems a partir de las
     posiciones de las palabras que reconoció el OCR. Devuelve lista
-    vacía si no pudo identificar una fila de encabezado reconocible."""
-    try:
-        datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
-    except pytesseract.TesseractError:
-        datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
+    vacía si no pudo identificar una fila de encabezado reconocible.
+
+    `datos` permite pasar las posiciones de palabras ya calculadas por
+    OTRO motor de OCR (ver ocr_paddle.datos_estilo_tesseract), en el
+    mismo formato que devuelve pytesseract.image_to_data. Si no se pasa,
+    se corre Tesseract sobre `imagen` como siempre."""
+    if datos is None:
+        try:
+            datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
+        except pytesseract.TesseractError:
+            datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
 
     lineas = agrupar_en_lineas(datos)
     if not lineas:
