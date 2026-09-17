@@ -6,7 +6,7 @@ PaddleOCR usa modelos de deep learning entrenados con fotos reales
 ("in the wild"), y suele leer bastante mejor imágenes de baja resolución
 o comprimidas — que es el caso de las fotos que llegan por WhatsApp.
 No es un LLM y no manda nada a ninguna API: baja los modelos una sola
-vez (~10MB) y después corre 100% local, igual que Tesseract.
+vez y después corre 100% local, igual que Tesseract.
 
 Este módulo es un ADAPTADOR: expone los resultados de PaddleOCR en el
 MISMO formato de diccionario que devuelve `pytesseract.image_to_data`
@@ -24,8 +24,9 @@ aproximación, pero funciona bien con las tipografías monoespaciadas
 (tipo máquina de escribir / matriz de puntos) de las facturas
 pre-impresas de distribuidoras, que es donde más lo necesitamos.
 
-Si PaddleOCR no está instalado, `disponible()` devuelve False y el
-llamador sigue con Tesseract: nunca rompe el flujo existente.
+Si PaddleOCR no está instalado o no se puede inicializar, el llamador
+sigue con Tesseract: nunca rompe el flujo existente. El motivo del
+fallo queda disponible en `motivo_fallo()` para poder mostrarlo.
 """
 import numpy as np
 
@@ -34,6 +35,14 @@ import numpy as np
 # reusa entre facturas.
 _OCR = None
 _INTENTO_FALLIDO = False
+_ULTIMO_ERROR = None  # motivo del ultimo fallo, para poder mostrarlo al usuario
+
+
+def motivo_fallo():
+    """Mensaje del ultimo error al intentar usar PaddleOCR, o None si
+    nunca fallo. Lo usa ocr_utils para avisarle al usuario por que se
+    proceso la factura con Tesseract en vez de Paddle."""
+    return _ULTIMO_ERROR
 
 
 def disponible() -> bool:
@@ -48,20 +57,50 @@ def disponible() -> bool:
 def _obtener_ocr(lang: str = "es"):
     """Devuelve la instancia de PaddleOCR, creándola la primera vez.
     Si la creación falla (falta el paquete, no pudo bajar los modelos,
-    no hay red la primera vez, etc.) devuelve None y lo recuerda, para
-    no reintentar en cada factura."""
-    global _OCR, _INTENTO_FALLIDO
+    no hay red la primera vez, etc.) devuelve None, guarda el motivo en
+    _ULTIMO_ERROR y lo recuerda, para no reintentar en cada factura."""
+    global _OCR, _INTENTO_FALLIDO, _ULTIMO_ERROR
     if _OCR is not None:
         return _OCR
     if _INTENTO_FALLIDO:
         return None
+
     try:
         from paddleocr import PaddleOCR
-        _OCR = PaddleOCR(lang=lang, use_textline_orientation=True)
-        return _OCR
-    except Exception:
+    except Exception as e:
         _INTENTO_FALLIDO = True
+        _ULTIMO_ERROR = f"no se pudo importar paddleocr ({type(e).__name__}: {e})"
         return None
+
+    # El nombre de los parametros cambio entre versiones de PaddleOCR
+    # (2.x usa use_angle_cls, 3.x usa use_textline_orientation) y ademas
+    # el idioma puede no estar disponible. Probamos de mas especifico a
+    # mas generico y nos quedamos con la primera forma que construya.
+    intentos = [
+        dict(lang=lang, use_textline_orientation=True),
+        dict(lang=lang, use_angle_cls=True),
+        dict(lang=lang),
+        dict(),
+    ]
+    ultimo = None
+    for kwargs in intentos:
+        try:
+            _OCR = PaddleOCR(**kwargs)
+            _ULTIMO_ERROR = None
+            return _OCR
+        except Exception as e:
+            ultimo = e
+
+    _INTENTO_FALLIDO = True
+    detalle = str(ultimo).split("\n")[0][:200] if ultimo else "motivo desconocido"
+    if "hosting" in detalle.lower() or "network" in detalle.lower() or "connect" in detalle.lower():
+        _ULTIMO_ERROR = (
+            "PaddleOCR no pudo descargar sus modelos (hace falta internet "
+            f"la primera vez). Detalle: {detalle}"
+        )
+    else:
+        _ULTIMO_ERROR = f"PaddleOCR no pudo inicializarse. Detalle: {detalle}"
+    return None
 
 
 def _resultado_a_regiones(salida):
