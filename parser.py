@@ -6,7 +6,7 @@ Cada campo de cabecera puede tener una o más expresiones regulares
 alternativas (se prueban en orden, se usa la primera que matchee), porque
 distintos proveedores/sistemas de facturación usan etiquetas distintas
 para el mismo dato (por ej. "Razón Social:" vs "Sres:", o "CAE Nro" vs
-"CAE N°:").
+"C.A.E.:").
 """
 import re
 import pdfplumber
@@ -72,6 +72,9 @@ HEADER_PATTERNS = {
         r"Condici[oó]n(?:\s+de)?\s+IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(CONS\.?\s*FINAL)",
+        # Algunas facturas pre-impresas ponen la condición del cliente
+        # abreviada, SIN la palabra "IVA" adelante (ej. "RESP. MONOTRIBUTO").
+        r"\bRESP\.?\s*(MONOTRIBUTO|INSCRIPTO)\b",
     ],
     "neto": [
         r"\bNeto\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)",
@@ -87,17 +90,21 @@ HEADER_PATTERNS = {
     "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)"],
     "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)(?!\s*%)"],
     "cae": [
-        r"CAE[A]?\s*N[°ºro.]{1,4}\.?\s*:?\s*(\d{10,15})",
-        r"N[uú]mero\s*(?:de\s*)?CAE\s*:?\s*(\d{10,15})",
+        r"C\.?A\.?E\.?[A]?\s*N[°ºro.]{1,4}\.?\s*:?\s*(\d{10,15})",
+        r"N[uú]mero\s*(?:de\s*)?C\.?A\.?E\.?\s*:?\s*(\d{10,15})",
         # "CAE N°: 86373284712148" (con símbolo de grado en vez de "Nro").
-        r"CAE\s*N[°º]\s*:?\s*(\d{10,15})",
+        r"C\.?A\.?E\.?\s*N[°º]\s*:?\s*(\d{10,15})",
+        # "C.A.E.: 86373158480603" (con puntos entre cada letra, sin
+        # "Nro"/"N°" alguno antes de los dígitos).
+        r"C\.?A\.?E\.?\s*:?\s*(\d{10,15})",
     ],
     "vencimiento_cae": [
         r"Vencimiento\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
         # Formato AAAAMMDD sin separadores ("20260925").
         r"Vencimiento\s*:?\s*(\d{8})\b",
-        # "Vto CAE: 25/09/2026" (abreviatura común en facturas prolijas).
-        r"Vto\.?\s*CAE\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
+        # "Vto C.A.E.: 25/09/2026" (abreviatura común en facturas prolijas,
+        # con o sin puntos entre las letras de CAE).
+        r"Vto\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
     ],
     "punto_venta": [r"\b(\d{4})-\d{7,8}\b"],
 }
@@ -150,14 +157,17 @@ def _normalizar_fecha(valor):
 
 def _normalizar_condicion_iva(valor):
     """Uniforma abreviaturas tipo 'CONS. FINAL' / 'CONS FINAL' a
-    'CONSUMIDOR FINAL', para que no queden como valores distintos en el
-    Excel según el proveedor."""
+    'CONSUMIDOR FINAL', y 'MONOTRIBUTO'/'INSCRIPTO' sueltos (sin la
+    palabra 'RESPONSABLE') a sus formas completas, para que no queden
+    como valores distintos en el Excel según el proveedor."""
     if not valor:
         return valor
     v = valor.strip().rstrip(".")
     if re.fullmatch(r"CONS\.?\s*FINAL", v, re.IGNORECASE):
         return "CONSUMIDOR FINAL"
-    return valor.strip()
+    if re.fullmatch(r"INSCRIPTO", v, re.IGNORECASE):
+        return "RESPONSABLE INSCRIPTO"
+    return v.upper() if v.upper() == "MONOTRIBUTO" else valor.strip()
 
 
 def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_cliente, patron_valor_tpl):
