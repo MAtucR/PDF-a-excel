@@ -89,6 +89,8 @@ def subir():
     ruta_original = os.path.join(UPLOAD_DIR, nombre_unico)
     archivo.save(ruta_original)
 
+    ruta_texto_debug = None
+
     try:
         if es_pdf:
             ruta_pdf = ruta_original
@@ -98,13 +100,21 @@ def subir():
             # procesa exactamente igual que cualquier otro PDF.
             nombre_base = os.path.splitext(nombre_unico)[0]
             ruta_pdf = os.path.join(UPLOAD_DIR, f"{nombre_base}_ocr.pdf")
-            convertir_imagen_a_pdf_ocr(ruta_original, ruta_pdf)
+            ruta_texto_debug = os.path.join(UPLOAD_DIR, f"{nombre_base}_texto_ocr.txt")
+            ruta_pdf, advertencia_ocr = convertir_imagen_a_pdf_ocr(
+                ruta_original, ruta_pdf, ruta_texto_debug
+            )
+            if advertencia_ocr:
+                flash(advertencia_ocr)
 
         resultado = procesar_factura(ruta_pdf)
         agregar_factura_a_excel(archivo.filename, resultado)
         campos_vacios = [k for k, v in resultado["cabecera"].items() if v is None]
         if campos_vacios:
-            flash(f"Factura cargada, pero no se pudieron detectar estos campos: {', '.join(campos_vacios)}")
+            mensaje = f"Factura cargada, pero no se pudieron detectar estos campos: {', '.join(campos_vacios)}"
+            if ruta_texto_debug:
+                mensaje += f". Podés revisar qué reconoció el OCR en uploads/{os.path.basename(ruta_texto_debug)}."
+            flash(mensaje)
         else:
             flash(f"Factura '{archivo.filename}' procesada correctamente ({len(resultado['items'])} ítems detectados).")
     except pytesseract.TesseractNotFoundError:
