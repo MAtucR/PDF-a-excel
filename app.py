@@ -4,7 +4,7 @@ from flask import Flask, request, render_template, send_file, flash, redirect, u
 from openpyxl import Workbook, load_workbook
 import pytesseract
 
-from parser import procesar_factura, limpiar_numero
+from parser import procesar_factura, limpiar_numero, extraer_cabecera
 from ocr_utils import es_imagen, convertir_imagen_a_pdf_ocr
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -136,6 +136,7 @@ def subir():
     ruta_items_debug = None
     items_ocr = []
     totales_ocr = {}
+    texto_ocr_combinado = None
 
     try:
         if es_pdf:
@@ -152,13 +153,26 @@ def subir():
             ruta_pdf = os.path.join(UPLOAD_DIR, f"{nombre_base}_ocr.pdf")
             ruta_texto_debug = os.path.join(UPLOAD_DIR, f"{nombre_base}_texto_ocr.txt")
             ruta_items_debug = os.path.join(UPLOAD_DIR, f"{nombre_base}_items_debug.json")
-            ruta_pdf, items_ocr, totales_ocr, advertencia_ocr = convertir_imagen_a_pdf_ocr(
+            (ruta_pdf, items_ocr, totales_ocr, advertencia_ocr,
+             texto_ocr_combinado) = convertir_imagen_a_pdf_ocr(
                 ruta_original, ruta_pdf, ruta_texto_debug
             )
             if advertencia_ocr:
                 flash(advertencia_ocr)
 
         resultado = procesar_factura(ruta_pdf)
+
+        # El PDF generado por OCR lleva SOLO la capa de texto de
+        # Tesseract sobre la version gris, asi que extraer la cabecera
+        # unicamente de ahi desperdicia lo que reconocieron mejor las
+        # otras pasadas. El texto combinado (Tesseract gris + binarizada
+        # + PaddleOCR) suele leer la cabecera bastante mejor: volvemos a
+        # correr los regex sobre el y completamos lo que quedo vacio.
+        if texto_ocr_combinado:
+            cabecera_combinada = extraer_cabecera(texto_ocr_combinado)
+            for campo, valor in cabecera_combinada.items():
+                if resultado["cabecera"].get(campo) is None and valor is not None:
+                    resultado["cabecera"][campo] = valor
 
         if not resultado["items"] and items_ocr:
             resultado["items"] = items_ocr
