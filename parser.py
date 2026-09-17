@@ -66,26 +66,14 @@ HEADER_PATTERNS = {
         r"Cliente\s*:?\s*(\d{3,})",
     ],
     "condicion_iva_cliente": [
-        # Más específico primero: "Condicion IVA: Monotributo" (común en
-        # facturas donde también aparece la condición del EMISOR con la
-        # etiqueta genérica "IVA", lo que confundiría al patrón genérico
-        # de abajo si se probara primero).
         r"Condici[oó]n(?:\s+de)?\s+IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
-        # "CLIENTE CONSUMIDOR FINAL" (facturas donde el campo "Cliente"
-        # muestra directamente la categoría fiscal en vez de un nombre,
-        # típico en ventas a consumidor final anónimo).
         r"CLIENTE\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(CONS\.?\s*FINAL)",
-        # Algunas facturas pre-impresas ponen la condición del cliente
-        # abreviada, SIN la palabra "IVA" adelante (ej. "RESP. MONOTRIBUTO").
         r"\bRESP\.?\s*(MONOTRIBUTO|INSCRIPTO)\b",
     ],
     "neto": [
         r"\bNeto\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)",
-        # Formato "Neto 21.00% $143287.43": hay que saltar la alícuota
-        # (que también tiene forma de monto decimal) antes de llegar al
-        # importe real.
         r"\bNeto\b[^\d\n]{0,15}\d+[,.]\d{1,2}%\s*[^\d\n]{0,10}([\d\.]+[,.]\d{2})",
     ],
     "iva": [
@@ -95,23 +83,15 @@ HEADER_PATTERNS = {
     "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)"],
     "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)(?!\s*%)"],
     "cae": [
-        r"C\.?A\.?E\.?[A]?\s*N[°ºro.]{1,4}\.?\s*:?\s*(\d{10,15})",
+        r"C\.?A\.?E\.?[A]?\s*N[º°ro.]{1,4}\.?\s*:?\s*(\d{10,15})",
         r"N[uú]mero\s*(?:de\s*)?C\.?A\.?E\.?\s*:?\s*(\d{10,15})",
-        # "CAE N°: 86373284712148" (con símbolo de grado en vez de "Nro").
-        r"C\.?A\.?E\.?\s*N[°º]\s*:?\s*(\d{10,15})",
-        # "C.A.E.: 86373158480603" (con puntos entre cada letra, sin
-        # "Nro"/"N°" alguno antes de los dígitos).
+        r"C\.?A\.?E\.?\s*N[º°]\s*:?\s*(\d{10,15})",
         r"C\.?A\.?E\.?\s*:?\s*(\d{10,15})",
     ],
     "vencimiento_cae": [
         r"Vencimiento\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
-        # Formato AAAAMMDD sin separadores ("20260925").
         r"Vencimiento\s*:?\s*(\d{8})\b",
-        # "Vto C.A.E.: 25/09/2026" (abreviatura común en facturas prolijas,
-        # con o sin puntos entre las letras de CAE).
         r"Vto\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
-        # "VENC. CAE: 26/09/2026" (otra abreviatura común, "Vencimiento"
-        # acortado a "Venc." en vez de "Vto.").
         r"VENC\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
     ],
     "punto_venta": [r"\b(\d{4})-\d{7,8}\b"],
@@ -129,20 +109,13 @@ def limpiar_numero(value: str):
     v = value.strip()
     try:
         if "," in v and "." in v:
-            # Tiene los dos separadores: el que aparece último es el
-            # decimal (ej. '13.175,99' -> coma decimal; '13,175.99' ->
-            # punto decimal).
             if v.rfind(",") > v.rfind("."):
                 v = v.replace(".", "").replace(",", ".")
             else:
                 v = v.replace(",", "")
         elif "," in v:
-            # Solo coma: la tomamos como decimal (formato argentino).
             v = v.replace(".", "").replace(",", ".")
         elif "." in v:
-            # Solo punto: si termina en exactamente 2 dígitos, es decimal
-            # (ej. '143287.43'); si no, probablemente sea separador de
-            # miles (ej. '1.234' sin centavos).
             partes = v.split(".")
             if len(partes[-1]) != 2:
                 v = v.replace(".", "")
@@ -152,8 +125,6 @@ def limpiar_numero(value: str):
 
 
 def _normalizar_fecha(valor):
-    """Si la fecha vino en formato AAAAMMDD (sin separadores), la pasa a
-    DD/MM/AAAA para que quede consistente en el Excel con el resto."""
     if not valor:
         return valor
     m = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", valor)
@@ -164,10 +135,6 @@ def _normalizar_fecha(valor):
 
 
 def _normalizar_condicion_iva(valor):
-    """Uniforma abreviaturas tipo 'CONS. FINAL' / 'CONS FINAL' a
-    'CONSUMIDOR FINAL', y 'MONOTRIBUTO'/'INSCRIPTO' sueltos (sin la
-    palabra 'RESPONSABLE') a sus formas completas, para que no queden
-    como valores distintos en el Excel según el proveedor."""
     if not valor:
         return valor
     v = valor.strip().rstrip(".")
@@ -180,30 +147,6 @@ def _normalizar_condicion_iva(valor):
 
 def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_cliente,
                                        patron_valor_tpl, valores_siempre_cliente=None):
-    """Cuando el emisor y el cliente terminan con el MISMO valor para un
-    campo (CUIT, condición de IVA), casi siempre es porque el texto solo
-    tenía UNA sola ocurrencia reconocible de la etiqueta y ambos patrones
-    (el genérico de emisor y el de cliente) cayeron sobre ella — el dato
-    de la OTRA parte simplemente no se pudo leer del todo en esta foto.
-
-    En vez de mostrar el mismo valor para los dos con confianza pudiendo
-    estar mal, decidimos a quién pertenece de verdad en este orden:
-
-    1. Si el valor en sí mismo ya lo delata (ej. "Consumidor Final" es
-       una categoría que solo tiene sentido para un CLIENTE; ningún
-       emisor que factura se declara a sí mismo así), se lo asignamos
-       directo sin mirar posiciones.
-    2. Si encontramos dónde empieza la información del cliente (ancla:
-       su razón social), comparamos la posición de la única ocurrencia
-       contra esa ancla: antes es del emisor, después es del cliente.
-    3. Si el texto menciona "Consumidor Final" en alguna parte (venta a
-       consumidor anónimo, sin nombre de cliente que sirva de ancla),
-       asumimos que el único dato reconocido es el del EMISOR — toda
-       factura tiene uno, mientras que un consumidor final anónimo
-       generalmente no aporta uno propio.
-    4. Si no hay ninguna pista, preferimos anular los dos antes que
-       arriesgarnos a mostrar el equivocado.
-    """
     if not resultado.get(campo_emisor) or resultado.get(campo_emisor) != resultado.get(campo_cliente):
         return
 
@@ -247,33 +190,23 @@ def extraer_cabecera(texto: str) -> dict:
                 break
         resultado[campo] = valor
 
-    # Post-proceso: limpiar espacios sueltos que a veces mete el OCR
-    # alrededor del guión del número de comprobante.
     if resultado.get("numero_factura"):
         resultado["numero_factura"] = re.sub(r"\s+", "", resultado["numero_factura"])
 
-    # Post-proceso: montos a float
     for campo_monto in ("neto", "iva", "subtotal", "total"):
         resultado[campo_monto] = limpiar_numero(resultado.get(campo_monto))
 
-    # Post-proceso: normalizar fechas y condición de IVA del cliente
     for campo_fecha in ("fecha_facturacion", "vencimiento_cae"):
         resultado[campo_fecha] = _normalizar_fecha(resultado.get(campo_fecha))
     resultado["condicion_iva_cliente"] = _normalizar_condicion_iva(
         resultado.get("condicion_iva_cliente")
     )
 
-    # Fallback para vencimiento_cae: en fotos, el OCR a veces parte la
-    # palabra "Vencimiento" en dos (ej. "Vencimien" ... "to: 20260925" en
-    # puntos distintos del texto), y ningún patrón de arriba matchea.
-    # Como último recurso, buscamos una fecha de 8 dígitos pegada cerca
-    # del número de CAE ya encontrado (suelen ir juntos en el documento).
     if not resultado.get("vencimiento_cae") and resultado.get("cae"):
         m = re.search(re.escape(resultado["cae"]) + r"[\s\S]{0,60}?(\d{8})\b", texto)
         if m:
             resultado["vencimiento_cae"] = _normalizar_fecha(m.group(1))
 
-    # Desambiguar (o anular con seguridad) los choques emisor/cliente.
     _resolver_colision_emisor_cliente(
         resultado, texto, "cuit_emisor", "cuit_cliente",
         r"C\.?U\.?I\.?T\.?\s*[:;]?\s*{valor}",
@@ -281,8 +214,6 @@ def extraer_cabecera(texto: str) -> dict:
     _resolver_colision_emisor_cliente(
         resultado, texto, "condicion_iva_emisor", "condicion_iva_cliente",
         r"IVA\s*:?\s*{valor}",
-        # "Consumidor Final" solo tiene sentido para un cliente; nunca
-        # para el emisor que factura.
         valores_siempre_cliente={"CONSUMIDOR FINAL"},
     )
 
@@ -298,7 +229,13 @@ def extraer_cabecera(texto: str) -> dict:
 # fotos (a partir de palabras sueltas reconocidas por OCR).
 ITEM_HEADER_HINTS = ["sku", "codigo", "código", "descripcion", "descripción",
                      "cantidad", "cant", "unitario", "precio", "subtotal", "iva",
-                     "importe", "neto", "dto"]
+                     "importe", "neto", "dto",
+                     # Variantes de OCR que aparecen en imágenes binarizadas
+                     # (la letra se deforma un poco por el umbral adaptativo,
+                     # y Tesseract lee caracteres parecidos pero distintos).
+                     "cob1go", "cobigo", "cod1go", "codlgo",
+                     "akticulo", "articulo", "artículo",
+                     "unit", "desc", "meto"]
 
 
 def _fila_es_encabezado(fila: list) -> bool:
@@ -321,14 +258,13 @@ def extraer_items(pdf_path: str) -> list:
                 if not tabla or len(tabla) < 2:
                     continue
 
-                # Buscar la fila de encabezado dentro de la tabla detectada
                 header_idx = None
                 for i, fila in enumerate(tabla):
                     if _fila_es_encabezado(fila):
                         header_idx = i
                         break
                 if header_idx is None:
-                    continue  # esta tabla no parece ser la de ítems
+                    continue
 
                 headers = [(_normalizar_header(c)) for c in tabla[header_idx]]
 
@@ -350,9 +286,6 @@ TOTAL_HEADER_HINTS = ["neto", "interno", "iva", "subtotal", "total", "res.", "pe
 
 
 def extraer_totales_tabla(pdf_path: str) -> dict:
-    """Busca, entre todas las tablas del PDF, una fila de encabezado tipo
-    'Neto | Interno | I.V.A. | SubTotal | ... | Total' seguida de su fila
-    de valores, y devuelve un dict {campo: monto}."""
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             for tabla in page.extract_tables():
@@ -373,26 +306,63 @@ def extraer_totales_tabla(pdf_path: str) -> dict:
 
 
 def _normalizar_header(nombre: str):
+    """Mapea el texto de un encabezado de columna a su nombre canónico.
+
+    Además de las variantes "normales" (ej. "Precio" y "Unitario" para
+    precio_unitario, "Importe" para subtotal), incluye variantes de OCR
+    que aparecen cuando la imagen pasa por binarización adaptativa: el
+    umbral cambia ligeramente la forma de las letras, y Tesseract lee
+    caracteres parecidos pero distintos (ej. "cob1go" en vez de
+    "codigo", "akticulo" en vez de "articulo", "meto" en vez de "neto").
+
+    También maneja el caso del encabezado compuesto "DESCRIPCION DEL
+    ARTICULO": como ocr_items.py trata cada PALABRA del encabezado como
+    una columna separada, "del" y "articulo" (y sus variantes OCR) se
+    mapean a "descripcion" para que las palabras de datos que caigan en
+    esos rangos se concatenen en el campo correcto.
+    """
     if not nombre:
         return None
     n = nombre.strip().lower().replace(".", "")
     mapa = {
+        # --- Columna SKU / CODIGO ---
         "sku": "sku", "codigo": "sku", "código": "sku",
+        # Variantes OCR de "CODIGO" (binarización deforma la D/I/O)
+        "cob1go": "sku", "cobigo": "sku", "cod1go": "sku", "codlgo": "sku",
+
+        # --- Columna DESCRIPCION ---
         "descripcion": "descripcion", "descripción": "descripcion",
-        "cantidad": "cantidad", "cant": "cantidad", "cant.": "cantidad",
+        # "DESCRIPCION DEL ARTICULO" partido en 3 palabras: las 3 van
+        # al mismo campo para que ocr_items las concatene.
+        "del": "descripcion",
+        "articulo": "descripcion", "artículo": "descripcion",
+        "akticulo": "descripcion",  # variante OCR de "ARTICULO"
+
+        # --- Columna CANTIDAD ---
+        "cantidad": "cantidad", "cant": "cantidad",
+
+        # --- Columna PRECIO UNITARIO ---
         "unitario": "precio_unitario", "precio unitario": "precio_unitario",
-        "unit": "precio_unitario",
-        # Facturas pre-impresas de distribuidoras suelen tener una sola
-        # columna "Precio" (sin la palabra "unitario") y "Dto" en vez de
-        # "Descuento"; otras usan "Importe" para el total de la línea en
-        # vez de "Subtotal", o "Precio Neto" en remitos con impuestos
-        # discriminados aparte.
-        "precio": "precio_unitario",
-        "precio neto": "precio_unitario",
-        "descuento": "descuento", "dto": "descuento",
+        "unit": "precio_unitario", "unit,": "precio_unitario",
+        "precio": "precio_unitario", "precio neto": "precio_unitario",
+        # "P. UNIT" partido: la "P" sola va a precio_unitario
+        "p": "precio_unitario",
+
+        # --- Columna DESCUENTO ---
+        "descuento": "descuento", "dto": "descuento", "desc": "descuento",
+
+        # --- Columna NETO ---
         "neto": "neto",
+        "meto": "neto",  # variante OCR de "NETO"
+        # "PR. NETO" partido: "PR" sola va a neto (el valor real
+        # viene en la palabra siguiente que cae en la columna NETO)
+        "pr": "neto", "pr:": "neto",
+
+        # --- Columnas de impuestos ---
         "interno": "interno", "internos": "interno",
         "iva": "iva",
+
+        # --- Columna SUBTOTAL / IMPORTE ---
         "subtotal": "subtotal", "importe": "subtotal", "total neto": "subtotal",
     }
     return mapa.get(n, n.replace(" ", "_"))
@@ -409,8 +379,6 @@ def procesar_factura(pdf_path: str) -> dict:
     cabecera = extraer_cabecera(texto_completo)
     items = extraer_items(pdf_path)
 
-    # Los totales son más confiables desde la tabla que desde el texto corrido;
-    # solo usamos el valor del regex si la tabla no dio nada.
     totales_tabla = extraer_totales_tabla(pdf_path)
     for campo in ("neto", "iva", "subtotal", "total"):
         if totales_tabla.get(campo) is not None:
@@ -419,5 +387,5 @@ def procesar_factura(pdf_path: str) -> dict:
     return {
         "cabecera": cabecera,
         "items": items,
-        "texto_crudo": texto_completo,  # útil para debug si algo no matcheó
+        "texto_crudo": texto_completo,
     }
