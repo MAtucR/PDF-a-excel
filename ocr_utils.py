@@ -16,6 +16,9 @@ en inglés por defecto, lo cual arruina bastante la lectura de facturas
 en español (tildes, formato de números, etc.). Ver instrucciones en el
 README, sección "OCR para fotos/imágenes".
 """
+import json
+import re
+
 import pytesseract
 from PIL import Image, ImageOps
 
@@ -46,11 +49,32 @@ def _hay_idioma_espanol() -> bool:
         return False
 
 
+def _corregir_rotacion(imagen: Image.Image) -> Image.Image:
+    """Fotos guardadas/reenviadas por WhatsApp a veces pierden el
+    metadato EXIF de orientación (que es lo que usa exif_transpose para
+    enderezar la foto), y quedan de costado. Tesseract puede detectar
+    esto (OSD: orientation and script detection) sin necesitar EXIF.
+    Si falla la detección (falta el paquete de datos 'osd', imagen muy
+    chica, etc.) seguimos sin rotar, no interrumpe el flujo.
+    """
+    try:
+        osd = pytesseract.image_to_osd(imagen)
+        m = re.search(r"Rotate:\s*(\d+)", osd)
+        if m:
+            angulo = int(m.group(1))
+            if angulo:
+                imagen = imagen.rotate(-angulo, expand=True)
+    except Exception:
+        pass
+    return imagen
+
+
 def _preprocesar(imagen: Image.Image) -> Image.Image:
     """Mejoras básicas para fotos sacadas con el celular:
 
-    - respeta la orientación real (los celulares guardan la rotación
-      como metadato EXIF, no rotando los píxeles)
+    - respeta la orientación real según EXIF (si el metadato existe)
+    - detecta y corrige rotaciones de 90/180/270 que no vinieron en el
+      EXIF (fotos reenviadas por WhatsApp, por ejemplo)
     - pasa a escala de grises
     - sube el contraste automáticamente
     - agranda la imagen si quedó chica, para que el OCR tenga más
@@ -59,6 +83,7 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
     imagen = ImageOps.exif_transpose(imagen)
     imagen = imagen.convert("L")
     imagen = ImageOps.autocontrast(imagen)
+    imagen = _corregir_rotacion(imagen)
 
     if imagen.width < ANCHO_MINIMO_OCR:
         factor = ANCHO_MINIMO_OCR / imagen.width
@@ -76,7 +101,10 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     palabras.
 
     Si se pasa `ruta_texto_debug`, también guarda ahí el texto plano que
-    reconoció el OCR, útil para diagnosticar cuando fallan campos.
+    reconoció el OCR, y un .json hermano (mismo nombre, sufijo
+    '_items_debug.json') con el detalle de qué ítems/totales se
+    reconstruyeron — útil para diagnosticar cuando la tabla de ítems
+    sale vacía o mezclada.
 
     Devuelve una tupla (ruta_pdf, items, totales, advertencia):
     - items: lista de dicts con los ítems reconstruidos (puede ser []).
@@ -137,5 +165,11 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     if ruta_texto_debug:
         with open(ruta_texto_debug, "w", encoding="utf-8") as f:
             f.write(texto)
+        try:
+            ruta_items_debug = ruta_texto_debug.replace("_texto_ocr.txt", "_items_debug.json")
+            with open(ruta_items_debug, "w", encoding="utf-8") as f:
+                json.dump({"items": items, "totales": totales}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     return ruta_pdf_salida, items, totales, advertencia

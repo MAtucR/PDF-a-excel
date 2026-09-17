@@ -27,7 +27,7 @@ from pytesseract import Output
 
 from parser import ITEM_HEADER_HINTS, _normalizar_header
 
-CONFIANZA_MINIMA = 40  # descarta palabras que el OCR reconoció con poca confianza
+CONFIANZA_MINIMA = 25  # descarta palabras que el OCR reconoció con muy poca confianza
 
 
 def _parsear_confianza(valor) -> int:
@@ -43,6 +43,14 @@ def agrupar_en_lineas(datos: dict) -> list:
     Tesseract: en zonas de tabla sin texto corrido, Tesseract puede
     segmentar bloques de forma poco intuitiva. Cada línea resultante es
     una lista de palabras ordenadas de izquierda a derecha.
+
+    Importante: cada palabra nueva se compara contra el PROMEDIO de
+    centro_y de la línea que se está armando (no contra la última
+    palabra agregada). Comparar solo contra la última palabra permite
+    que un "encadenamiento" de pequeños corrimientos verticales termine
+    fusionando varias filas reales de una tabla en una sola línea
+    gigante — justamente el bug que hacía que la tabla de ítems se
+    reconstruyera mal.
 
     Pública (sin _ adelante) porque también la usa ocr_totales.py para
     reconstruir la fila de Subtotal/IVA/Total del pie de la factura.
@@ -72,12 +80,13 @@ def agrupar_en_lineas(datos: dict) -> list:
     palabras.sort(key=lambda p: (p["centro_y"], p["centro_x"]))
     alturas = sorted(p["height"] for p in palabras)
     altura_tipica = alturas[len(alturas) // 2]
-    umbral = max(altura_tipica * 0.7, 8)
+    umbral = max(altura_tipica * 0.55, 8)
 
     lineas = []
     linea_actual = [palabras[0]]
     for p in palabras[1:]:
-        if abs(p["centro_y"] - linea_actual[-1]["centro_y"]) <= umbral:
+        promedio_y = sum(w["centro_y"] for w in linea_actual) / len(linea_actual)
+        if abs(p["centro_y"] - promedio_y) <= umbral:
             linea_actual.append(p)
         else:
             lineas.append(sorted(linea_actual, key=lambda w: w["centro_x"]))

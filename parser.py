@@ -5,7 +5,8 @@ No usa LLM: regex para cabecera + detección de tablas de pdfplumber para ítems
 Cada campo de cabecera puede tener una o más expresiones regulares
 alternativas (se prueban en orden, se usa la primera que matchee), porque
 distintos proveedores/sistemas de facturación usan etiquetas distintas
-para el mismo dato (por ej. "Razón Social:" vs "Sres:").
+para el mismo dato (por ej. "Razón Social:" vs "Sres:", o "CAE Nro" vs
+"CAE N°:").
 """
 import re
 import pdfplumber
@@ -17,17 +18,21 @@ import pdfplumber
 
 HEADER_PATTERNS = {
     "tipo_comprobante": [
-        # Caso típico: la palabra (FACTURA/...) seguida de la letra A/B/C.
-        r"\b(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO)\b[\s\S]{0,15}?\b([ABC])\b",
+        # Caso típico: la palabra (FACTURA/...) seguida de la letra A/B/C
+        # (o R de Remito, que no tiene CAE y no es válido como factura).
+        r"\b(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\b[\s\S]{0,15}?\b([ABCR])\b",
         # Facturas pre-impresas de distribuidoras: la letra viene en un
         # recuadro que el OCR a veces lee ANTES que la palabra.
-        r"\b([ABC])\b[\s\S]{0,40}?\b(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO)\b",
+        r"\b([ABCR])\b[\s\S]{0,40}?\b(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\b",
     ],
     "numero_factura": [
-        r"(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO)\s+[ABC]\s+([\d\-]{5,20})",
-        # Formato "0003-01084580" solo (punto de venta + número), sin el
-        # tipo pegado justo adelante.
+        r"(?:FACTURA|NOTA DE CR[EÉ]DITO|NOTA DE D[EÉ]BITO|RECIBO|REMITO)\s+[ABCR]\s+([\d\-]{5,20})",
+        # Formato "0003-01084580" (punto de venta de 4 dígitos + número
+        # de 7/8), sin el tipo pegado justo adelante.
         r"\b(\d{4}-\d{7,8})\b",
+        # Otros formatos con distinta cantidad de dígitos a cada lado del
+        # guión (ej. remitos: "90099-00004158").
+        r"\b(\d{3,6}-\d{6,9})\b",
     ],
     "fecha_facturacion": [
         r"Fecha\s*(?:de\s*)?facturaci[oó]n\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
@@ -57,29 +62,56 @@ HEADER_PATTERNS = {
         r"IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(CONS\.?\s*FINAL)",
     ],
-    "neto": [r"\bNeto\b[^\d\n]{0,10}([\d\.]+,\d{2})"],
-    "iva": [r"\bI\.?V\.?A\.?\b[^\d\n]{0,10}([\d\.]+,\d{2})"],
-    "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+,\d{2})"],
-    "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+,\d{2})(?!\s*\d)"],
+    "neto": [r"\bNeto\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})"],
+    "iva": [r"\bI\.?V\.?A\.?\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})"],
+    "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})"],
+    "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)"],
     "cae": [
-        r"CAE[A]?\s*Nro\.?\s*:?\s*(\d{10,15})",
+        r"CAE[A]?\s*N[°ºro.]{1,4}\.?\s*:?\s*(\d{10,15})",
         r"N[uú]mero\s*(?:de\s*)?CAE\s*:?\s*(\d{10,15})",
+        # "CAE N°: 86373284712148" (con símbolo de grado en vez de "Nro").
+        r"CAE\s*N[°º]\s*:?\s*(\d{10,15})",
     ],
     "vencimiento_cae": [
         r"Vencimiento\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
         # Formato AAAAMMDD sin separadores ("20260925").
         r"Vencimiento\s*:?\s*(\d{8})\b",
+        # "Vto CAE: 25/09/2026" (abreviatura común en facturas prolijas).
+        r"Vto\.?\s*CAE\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
     ],
     "punto_venta": [r"\b(\d{4})-\d{7,8}\b"],
 }
 
 
 def limpiar_numero(value: str):
-    """Convierte '13.175,99' -> 13175.99"""
+    """Convierte un monto de texto a float, detectando automáticamente si
+    usa el formato argentino (punto de miles, coma decimal: '13.175,99')
+    o el formato con punto decimal ('143287.43', común en algunos
+    sistemas de facturación aunque no sea lo habitual en Argentina).
+    """
     if not value:
         return None
+    v = value.strip()
     try:
-        return float(value.replace(".", "").replace(",", "."))
+        if "," in v and "." in v:
+            # Tiene los dos separadores: el que aparece último es el
+            # decimal (ej. '13.175,99' -> coma decimal; '13,175.99' ->
+            # punto decimal).
+            if v.rfind(",") > v.rfind("."):
+                v = v.replace(".", "").replace(",", ".")
+            else:
+                v = v.replace(",", "")
+        elif "," in v:
+            # Solo coma: la tomamos como decimal (formato argentino).
+            v = v.replace(".", "").replace(",", ".")
+        elif "." in v:
+            # Solo punto: si termina en exactamente 2 dígitos, es decimal
+            # (ej. '143287.43'); si no, probablemente sea separador de
+            # miles (ej. '1.234' sin centavos).
+            partes = v.split(".")
+            if len(partes[-1]) != 2:
+                v = v.replace(".", "")
+        return float(v)
     except ValueError:
         return None
 
@@ -154,7 +186,8 @@ def extraer_cabecera(texto: str) -> dict:
 # También los usa ocr_items.py para detectar la fila de encabezado en
 # fotos (a partir de palabras sueltas reconocidas por OCR).
 ITEM_HEADER_HINTS = ["sku", "codigo", "código", "descripcion", "descripción",
-                     "cantidad", "cant", "unitario", "precio", "subtotal", "iva"]
+                     "cantidad", "cant", "unitario", "precio", "subtotal", "iva",
+                     "importe"]
 
 
 def _fila_es_encabezado(fila: list) -> bool:
@@ -237,15 +270,17 @@ def _normalizar_header(nombre: str):
         "descripcion": "descripcion", "descripción": "descripcion",
         "cantidad": "cantidad", "cant": "cantidad", "cant.": "cantidad",
         "unitario": "precio_unitario", "precio unitario": "precio_unitario",
+        "unit": "precio_unitario",
         # Facturas pre-impresas de distribuidoras suelen tener una sola
         # columna "Precio" (sin la palabra "unitario") y "Dto" en vez de
-        # "Descuento".
+        # "Descuento"; otras usan "Importe" para el total de la línea en
+        # vez de "Subtotal".
         "precio": "precio_unitario",
         "descuento": "descuento", "dto": "descuento",
         "neto": "neto",
         "interno": "interno", "internos": "interno",
         "iva": "iva",
-        "subtotal": "subtotal",
+        "subtotal": "subtotal", "importe": "subtotal",
     }
     return mapa.get(n, n.replace(" ", "_"))
 
