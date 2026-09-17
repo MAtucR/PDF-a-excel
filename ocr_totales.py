@@ -19,19 +19,30 @@ from pytesseract import Output
 
 from ocr_items import agrupar_en_lineas
 
-# Alias que puede traer cada campo. "ubtotal" cubre el caso de que la
-# foto recorte la "S" inicial de "SUBTOTAL" (pasa si el borde de la hoja
-# queda pegado al borde de la foto).
-CAMPOS_BUSCADOS = {
-    "neto": ("neto",),
-    "subtotal": ("subtotal", "ubtotal"),
-    "iva": ("iva",),
-    "total": ("total",),
-}
-
 
 def _palabra_normalizada(texto: str) -> str:
     return re.sub(r"[^a-záéíóúñ]", "", texto.lower())
+
+
+def _campo_de_palabra(norm: str):
+    """Identifica si una palabra (ya normalizada) corresponde a alguno de
+    los campos que buscamos. Para 'subtotal' usamos coincidencia por
+    substring en vez de una lista fija de variantes: la 'S' o 'SU'
+    inicial de "SUBTOTAL" es justamente la parte que más se suele leer
+    mal en fotos (recortes de borde, sombras, etc.), y puede salir como
+    'ubtotal', 'jbtotal', 'gbtotal', etc. — pero siempre termina en
+    'total'. Para 'total' exigimos la palabra EXACTA para no confundirla
+    con esas mismas variantes de 'subtotal'.
+    """
+    if norm == "neto":
+        return "neto"
+    if norm == "iva":
+        return "iva"
+    if norm == "total":
+        return "total"
+    if norm.endswith("total") and norm != "total":
+        return "subtotal"
+    return None
 
 
 def _es_numero(token: str) -> bool:
@@ -61,13 +72,13 @@ def extraer_totales_desde_imagen(imagen, lang: str = "spa") -> dict:
     campos_ya_encontrados = set()
     for linea in reversed(lineas):
         for palabra in linea:
+            if len(campos_ya_encontrados) == 4:
+                break
             norm = _palabra_normalizada(palabra["texto"])
-            for campo, alias in CAMPOS_BUSCADOS.items():
-                if campo in campos_ya_encontrados:
-                    continue
-                if norm in alias:
-                    candidatos.append((campo, palabra["centro_x"], palabra["top"]))
-                    campos_ya_encontrados.add(campo)
+            campo = _campo_de_palabra(norm)
+            if campo and campo not in campos_ya_encontrados:
+                candidatos.append((campo, palabra["centro_x"], palabra["top"]))
+                campos_ya_encontrados.add(campo)
 
     if not candidatos:
         return {}
