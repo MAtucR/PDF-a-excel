@@ -1,8 +1,10 @@
-# Facturas PDF → Excel
+# Facturas PDF/Foto → Excel
 
-App local en Flask que sube facturas AFIP en PDF y las vuelca a un Excel
-(una hoja de cabeceras + una hoja de ítems), sin usar ninguna LLM: todo
-extracción determinística con `pdfplumber` (texto + tablas) y regex.
+App local en Flask que sube facturas AFIP (en PDF o como foto/imagen) y
+las vuelca a un Excel (una hoja de cabeceras + una hoja de ítems), sin
+usar ninguna LLM: todo extracción determinística con `pdfplumber`
+(texto + tablas) y regex. Las fotos/imágenes se convierten primero a un
+PDF con OCR (Tesseract) y de ahí en más pasan por el mismo pipeline.
 
 ## Instalación paso a paso (Windows)
 
@@ -55,20 +57,25 @@ extracción determinística con `pdfplumber` (texto + tablas) y regex.
    ```
    confirmá con `S`, y volvé a intentar activar.
 
-7. **Instalar las dependencias**: con el entorno activado:
+7. **Instalar las dependencias de Python**: con el entorno activado:
    ```powershell
    pip install -r requirements.txt
    ```
-   Esto instala Flask, pdfplumber y openpyxl (puede tardar 1-2 minutos).
+   Esto instala Flask, pdfplumber, openpyxl, pytesseract y Pillow
+   (puede tardar 1-2 minutos).
 
-8. **Correr la aplicación**:
+8. **Instalar Tesseract OCR** (necesario solo para procesar fotos/
+   imágenes; si solo vas a subir PDFs, podés saltear este paso). Ver la
+   sección **"OCR para fotos/imágenes"** más abajo.
+
+9. **Correr la aplicación**:
    ```powershell
    python app.py
    ```
    Vas a ver un mensaje tipo `Running on http://127.0.0.1:5000`. Dejá
    esa ventana de la terminal abierta y abrí esa dirección en tu
    navegador (Chrome, Edge, el que uses) — ahí ya podés subir tu
-   primera factura PDF.
+   primera factura (PDF o foto).
 
 **Para usarla de nuevo más adelante** no hace falta repetir todos los
 pasos: alcanza con abrir PowerShell en la carpeta del proyecto y correr:
@@ -86,11 +93,42 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
+## OCR para fotos/imágenes
+
+Para que la app pueda leer fotos/imágenes (no solo PDFs) hace falta
+tener instalado el **programa** Tesseract OCR en la compu, además del
+paquete de Python `pytesseract` (que ya quedó en `requirements.txt`).
+`pytesseract` es solo un wrapper: si el binario no está instalado, la
+app te va a avisar con un mensaje de error al subir una foto.
+
+**Windows**: descargá el instalador desde
+https://github.com/UB-Mannheim/tesseract/wiki (es el build de Windows
+más usado). Durante la instalación, en la lista de "Additional language
+data", tildá **Spanish** para que reconozca mejor los textos en
+español. Si después la app no lo encuentra, puede que necesites agregar
+la carpeta de instalación (por defecto algo como
+`C:\Program Files\Tesseract-OCR`) al PATH del sistema, o setear en
+`ocr_utils.py`:
+```python
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+**Mac**:
+```bash
+brew install tesseract tesseract-lang
+```
+
+**Linux (Debian/Ubuntu)**:
+```bash
+sudo apt install tesseract-ocr tesseract-ocr-spa
+```
+
 ## Uso
 
-Subís el PDF y listo. Cada factura que subís se va agregando como fila
-nueva al mismo `output/facturas.xlsx` (no lo pisa). Podés descargarlo
-con el botón, o reiniciarlo si querés empezar de cero.
+Subís el PDF o la foto de la factura y listo. Cada factura que subís se
+va agregando como fila nueva al mismo `output/facturas.xlsx` (no lo
+pisa). Podés descargarlo con el botón, o reiniciarlo si querés empezar
+de cero.
 
 ## Cómo funciona (parser.py)
 
@@ -107,6 +145,29 @@ con el botón, o reiniciarlo si querés empezar de cero.
    la fila de encabezado (por palabras clave como "descripción",
    "cantidad", "unitario") y corta al llegar a la fila "Totales".
 
+## Cómo funciona con fotos/imágenes (ocr_utils.py)
+
+Cuando el archivo subido no es un `.pdf` sino una imagen (jpg, png,
+webp, bmp, tif), `ocr_utils.convertir_imagen_a_pdf_ocr`:
+
+1. Corrige la orientación según el metadato EXIF de la foto (para que
+   no quede rotada 90°), la pasa a escala de grises y le sube el
+   contraste automáticamente.
+2. Le corre OCR con Tesseract y genera un PDF "buscable" (la imagen +
+   una capa de texto invisible superpuesta con lo que Tesseract
+   reconoció).
+3. Ese PDF se pasa **tal cual** a `parser.procesar_factura()` — el
+   mismo código que ya procesá PDFs digitales, sin ningún cambio.
+
+**Limitación a tener en cuenta**: la detección de la tabla de ítems
+(`extract_tables()`) depende de que el PDF tenga líneas/bordes reales
+dibujados. Una foto no tiene eso — solo píxeles — así que en fotos es
+esperable que la tabla de ítems se detecte peor que en un PDF digital
+de AFIP, aunque la cabecera (CUIT, fecha, totales, etc.) suele salir
+bien porque sale de texto plano con regex. Para mejores resultados con
+fotos: sacarlas derechas, bien iluminadas, y recortadas a la hoja (sin
+fondo de mesa alrededor).
+
 ## Si tus facturas no matchean bien
 
 Los patrones en `HEADER_PATTERNS` (dict al principio de `parser.py`) y
@@ -114,8 +175,3 @@ las palabras clave en `ITEM_HEADER_HINTS` son el lugar donde ajustar
 cuando aparezca un proveedor con un formato distinto. Si la factura
 sube pero faltan campos, la app te avisa cuáles no pudo detectar — con
 eso podés ir agregando el patrón puntual que falte.
-
-**Importante**: esto solo funciona con PDFs que tienen capa de texto
-(la gran mayoría de las facturas electrónicas AFIP). Si alguna vez te
-llega una factura escaneada como imagen, vas a necesitar sumar OCR
-(`pytesseract`) antes de este pipeline — avisame si llega ese caso.

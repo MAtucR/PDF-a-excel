@@ -2,8 +2,10 @@ import os
 import uuid
 from flask import Flask, request, render_template, send_file, flash, redirect, url_for
 from openpyxl import Workbook, load_workbook
+import pytesseract
 
 from parser import procesar_factura
+from ocr_utils import es_imagen, convertir_imagen_a_pdf_ocr
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -76,15 +78,28 @@ def subir():
         flash("No seleccionaste ningún archivo.")
         return redirect(url_for("index"))
 
-    if not archivo.filename.lower().endswith(".pdf"):
-        flash("El archivo debe ser un PDF.")
+    nombre_lower = archivo.filename.lower()
+    es_pdf = nombre_lower.endswith(".pdf")
+
+    if not es_pdf and not es_imagen(nombre_lower):
+        flash("El archivo debe ser un PDF o una foto/imagen (jpg, jpeg, png, webp, bmp, tif).")
         return redirect(url_for("index"))
 
     nombre_unico = f"{uuid.uuid4().hex[:8]}_{archivo.filename}"
-    ruta_pdf = os.path.join(UPLOAD_DIR, nombre_unico)
-    archivo.save(ruta_pdf)
+    ruta_original = os.path.join(UPLOAD_DIR, nombre_unico)
+    archivo.save(ruta_original)
 
     try:
+        if es_pdf:
+            ruta_pdf = ruta_original
+        else:
+            # Es una foto/imagen: primero la convertimos en un PDF con OCR
+            # (imagen + texto reconocido superpuesto) y de ahí en más se
+            # procesa exactamente igual que cualquier otro PDF.
+            nombre_base = os.path.splitext(nombre_unico)[0]
+            ruta_pdf = os.path.join(UPLOAD_DIR, f"{nombre_base}_ocr.pdf")
+            convertir_imagen_a_pdf_ocr(ruta_original, ruta_pdf)
+
         resultado = procesar_factura(ruta_pdf)
         agregar_factura_a_excel(archivo.filename, resultado)
         campos_vacios = [k for k, v in resultado["cabecera"].items() if v is None]
@@ -92,8 +107,13 @@ def subir():
             flash(f"Factura cargada, pero no se pudieron detectar estos campos: {', '.join(campos_vacios)}")
         else:
             flash(f"Factura '{archivo.filename}' procesada correctamente ({len(resultado['items'])} ítems detectados).")
+    except pytesseract.TesseractNotFoundError:
+        flash(
+            "No se encontró el programa Tesseract OCR instalado en el sistema. "
+            "Revás la sección 'OCR para fotos/imágenes' en el README para instalarlo."
+        )
     except Exception as e:
-        flash(f"Error procesando el PDF: {e}")
+        flash(f"Error procesando el archivo: {e}")
 
     return redirect(url_for("index"))
 
