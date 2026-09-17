@@ -20,9 +20,10 @@ import json
 import re
 
 import pytesseract
+from pytesseract import Output
 from PIL import Image, ImageOps
 
-from ocr_items import extraer_items_desde_imagen
+from ocr_items import extraer_items_desde_imagen, agrupar_en_lineas
 from ocr_totales import extraer_totales_desde_imagen
 
 # Extensiones de imagen que la app acepta además de .pdf
@@ -93,6 +94,31 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
     return imagen
 
 
+def _lineas_para_debug(imagen: Image.Image, lang: str) -> list:
+    """Devuelve, para el .json de debug, el texto de cada línea que
+    detectó el agrupador por posición (ocr_items.agrupar_en_lineas), y
+    si esa línea fue reconocida como el encabezado de la tabla de
+    ítems. Sirve para diagnosticar cuándo la tabla sale vacía: si no hay
+    ninguna línea marcada como encabezado, el problema es que el OCR no
+    reconoció bien esas palabras clave (o quedaron mezcladas con otro
+    texto); si hay encabezado pero pocas o ninguna fila después, el
+    problema es el corte por salto en blanco o por "fila de totales".
+    """
+    from ocr_items import _es_linea_encabezado  # uso interno, solo para debug
+    try:
+        datos = pytesseract.image_to_data(imagen, lang=lang, output_type=Output.DICT)
+    except pytesseract.TesseractError:
+        datos = pytesseract.image_to_data(imagen, output_type=Output.DICT)
+    lineas = agrupar_en_lineas(datos)
+    return [
+        {
+            "texto": " ".join(p["texto"] for p in linea),
+            "es_encabezado_detectado": _es_linea_encabezado(linea),
+        }
+        for linea in lineas
+    ]
+
+
 def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_texto_debug: str = None):
     """
     Toma la ruta de una imagen, le corre OCR y genera en `ruta_pdf_salida`
@@ -102,9 +128,10 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
 
     Si se pasa `ruta_texto_debug`, también guarda ahí el texto plano que
     reconoció el OCR, y un .json hermano (mismo nombre, sufijo
-    '_items_debug.json') con el detalle de qué ítems/totales se
-    reconstruyeron — útil para diagnosticar cuando la tabla de ítems
-    sale vacía o mezclada.
+    '_items_debug.json') con los ítems/totales reconstruidos y, cuando
+    la tabla de ítems sale vacía, el detalle de cada línea que se
+    detectó por posición (ver _lineas_para_debug) para diagnosticar por
+    qué sin adivinar.
 
     Devuelve una tupla (ruta_pdf, items, totales, advertencia):
     - items: lista de dicts con los ítems reconstruidos (puede ser []).
@@ -159,6 +186,13 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         except Exception:
             totales = {}
 
+        lineas_debug = None
+        if ruta_texto_debug and not items:
+            try:
+                lineas_debug = _lineas_para_debug(imagen, lang_usado or "eng")
+            except Exception:
+                lineas_debug = None
+
     with open(ruta_pdf_salida, "wb") as f:
         f.write(pdf_bytes)
 
@@ -167,8 +201,11 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
             f.write(texto)
         try:
             ruta_items_debug = ruta_texto_debug.replace("_texto_ocr.txt", "_items_debug.json")
+            contenido_debug = {"items": items, "totales": totales}
+            if lineas_debug is not None:
+                contenido_debug["lineas_detectadas"] = lineas_debug
             with open(ruta_items_debug, "w", encoding="utf-8") as f:
-                json.dump({"items": items, "totales": totales}, f, ensure_ascii=False, indent=2)
+                json.dump(contenido_debug, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
