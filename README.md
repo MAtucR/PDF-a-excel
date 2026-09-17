@@ -61,8 +61,10 @@ PDF con OCR (Tesseract) y de ahí en más pasan por el mismo pipeline.
    ```powershell
    pip install -r requirements.txt
    ```
-   Esto instala Flask, pdfplumber, openpyxl, pytesseract y Pillow
-   (puede tardar 1-2 minutos).
+   Esto instala Flask, pdfplumber, openpyxl, pytesseract, Pillow y
+   OpenCV (puede tardar 2-4 minutos la primera vez, OpenCV pesa unos
+   40-60MB — no hace falta ningún compilador ni instalación aparte,
+   todo viene ya compilado en el paquete de pip).
 
 8. **Instalar Tesseract OCR** (necesario solo para procesar fotos/
    imágenes; si solo vas a subir PDFs, podés saltear este paso). Ver la
@@ -150,23 +152,31 @@ de cero.
 Cuando el archivo subido no es un `.pdf` sino una imagen (jpg, png,
 webp, bmp, tif), `ocr_utils.convertir_imagen_a_pdf_ocr`:
 
-1. Corrige la orientación según el metadato EXIF de la foto (para que
-   no quede rotada 90°), la pasa a escala de grises y le sube el
-   contraste automáticamente.
-2. Le corre OCR con Tesseract y genera un PDF "buscable" (la imagen +
+1. Corrige la orientación según el metadato EXIF de la foto, y busca la
+   hoja de la factura dentro de la foto para separarla del fondo (mesa,
+   teclado, etc.) y enderezarla por perspectiva — como el modo
+   "documento" de la cámara de un celular o un scanner (ver
+   `escaner.py`). Es best-effort: si no encuentra la hoja con confianza
+   (por ejemplo, si el fondo alrededor de la hoja es muy parecido en
+   color, o la hoja ocupa muy poco del cuadro), sigue con la foto
+   original sin recortar.
+2. Pasa a escala de grises, sube el contraste, corrige rotaciones de
+   90°/180°/270° (vía OSD de Tesseract) y agranda la imagen si quedó
+   chica, para que el OCR tenga más píxeles por letra.
+3. Le corre OCR con Tesseract y genera un PDF "buscable" (la imagen +
    una capa de texto invisible superpuesta con lo que Tesseract
    reconoció).
-3. Ese PDF se pasa **tal cual** a `parser.procesar_factura()` — el
-   mismo código que ya procesá PDFs digitales, sin ningún cambio.
+4. Ese PDF se pasa **tal cual** a `parser.procesar_factura()` — el
+   mismo código que ya procesa PDFs digitales, sin ningún cambio. Además,
+   `ocr_items.py`/`ocr_totales.py` reconstruyen la tabla de ítems y la
+   fila de totales por posición de palabras (ver sus propios docstrings).
 
-**Limitación a tener en cuenta**: la detección de la tabla de ítems
-(`extract_tables()`) depende de que el PDF tenga líneas/bordes reales
-dibujados. Una foto no tiene eso — solo píxeles — así que en fotos es
-esperable que la tabla de ítems se detecte peor que en un PDF digital
-de AFIP, aunque la cabecera (CUIT, fecha, totales, etc.) suele salir
-bien porque sale de texto plano con regex. Para mejores resultados con
-fotos: sacarlas derechas, bien iluminadas, y recortadas a la hoja (sin
-fondo de mesa alrededor).
+**Limitación a tener en cuenta**: incluso con la hoja bien recortada y
+derecha, si la foto original tiene poca resolución (por ejemplo, viene
+de WhatsApp, que recomprime bastante) el texto chico —cabecera, columna
+de precios— puede quedar ilegible. Ninguna corrección geométrica puede
+"inventar" detalle que la compresión ya descartó; en esos casos conviene
+mandar la foto por otro medio (sin recomprimir) o sacarla más de cerca.
 
 ## Si tus facturas no matchean bien
 

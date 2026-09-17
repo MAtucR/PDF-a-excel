@@ -23,6 +23,7 @@ import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageFilter, ImageOps
 
+from escaner import enderezar_documento
 from ocr_items import extraer_items_desde_imagen, agrupar_en_lineas
 from ocr_totales import extraer_totales_desde_imagen
 
@@ -71,9 +72,15 @@ def _corregir_rotacion(imagen: Image.Image) -> Image.Image:
 
 
 def _preprocesar(imagen: Image.Image) -> Image.Image:
-    """Mejoras básicas para fotos sacadas con el celular:
+    """Mejoras para fotos sacadas con el celular:
 
     - respeta la orientación real según EXIF (si el metadato existe)
+    - detecta la hoja de la factura y la separa del fondo (mesa,
+      teclado, etc.), corrigiendo de paso la distorsión de perspectiva
+      (trapecio) de una foto sacada en ángulo — como el modo
+      "documento" de la cámara de un celular o un scanner (ver
+      escaner.enderezar_documento). Es best-effort y conservador: si no
+      encuentra la hoja con confianza, sigue con la foto sin tocar.
     - detecta y corrige rotaciones de 90/180/270 que no vinieron en el
       EXIF (fotos reenviadas por WhatsApp, por ejemplo)
     - pasa a escala de grises
@@ -83,28 +90,20 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
     - le da un poco de nitidez (unsharp mask), para compensar fotos
       levemente borrosas o comprimidas (WhatsApp, etc.)
 
-    NOTA: se probó agregar también un deskew fino (corrección de
-    inclinaciones chicas por perfil de proyección) y se revirtió: aunque
-    en teoría ayuda a Tesseract a leer mejor el texto, es contraproducente
-    para ESTE pipeline en particular. La reconstrucción de la tabla de
-    ítems (ocr_items.py) y de la fila de totales (ocr_totales.py) agrupan
-    palabras en la misma fila cuando su coordenada Y difiere menos de un
-    umbral de apenas ~10-15px. Una rotación de solo 1°-1.5° ya desplaza
-    verticalmente la columna IMPORTE (extremo derecho) respecto del SKU
-    (extremo izquierdo) de una misma fila en 20-30px, más que ese umbral
-    — alcanza para que una fila real se reconstruya como dos filas
-    partidas. El riesgo es mayor todavía porque el ángulo se estimaba
-    sobre la foto COMPLETA (incluyendo fondo: mesa, teclado, etc.), no
-    solo la hoja, así que el ángulo detectado podía no ser el real. En
-    los hechos, con una foto real de prueba, esto rompió tanto la tabla
-    de ítems (filas partidas en dos) como la cabecera (etiquetas y
-    valores separados en líneas distintas). Si en el futuro se lo quiere
-    reintentar, hay que hacerlo tolerante a esto: o se opera solo sobre
-    la región de la hoja (no la foto entera), o se hace que el agrupador
-    de líneas tolere un corrimiento vertical proporcional a la distancia
-    horizontal (una recta con pendiente, no un umbral fijo).
+    NOTA: antes se había probado un deskew fino (corrección de
+    inclinaciones chicas por perfil de proyección, calculado sobre la
+    foto COMPLETA) y se revirtió porque rompía la alineación de filas
+    que necesita ocr_items.py/ocr_totales.py (un error de apenas 1°-1.5°
+    ya desplaza la columna IMPORTE respecto del SKU de una misma fila
+    20-30px, más de lo que tolera el agrupador de líneas). El
+    enderezado por perspectiva de acá arriba no tiene ese problema:
+    cuando encuentra la hoja con confianza la endereza de verdad (no
+    una aproximación), y cuando no la encuentra no toca nada — nunca
+    aplica una corrección "a medias" que pueda desalinear una foto que
+    ya estaba bien.
     """
     imagen = ImageOps.exif_transpose(imagen)
+    imagen = enderezar_documento(imagen)
     imagen = imagen.convert("L")
     imagen = ImageOps.autocontrast(imagen)
     imagen = _corregir_rotacion(imagen)
