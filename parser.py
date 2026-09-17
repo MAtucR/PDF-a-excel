@@ -59,13 +59,27 @@ HEADER_PATTERNS = {
         r"Cliente\s*:?\s*(\d{3,})",
     ],
     "condicion_iva_cliente": [
-        r"IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|EXENTO|CONSUMIDOR FINAL)",
+        # Más específico primero: "Condicion IVA: Monotributo" (común en
+        # facturas donde también aparece la condición del EMISOR con la
+        # etiqueta genérica "IVA", lo que confundiría al patrón genérico
+        # de abajo si se probara primero).
+        r"Condici[oó]n(?:\s+de)?\s+IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
+        r"IVA\s*:?\s*(RESPONSABLE INSCRIPTO|MONOTRIBUTISTA|MONOTRIBUTO|EXENTO|CONSUMIDOR FINAL)",
         r"IVA\s*:?\s*(CONS\.?\s*FINAL)",
     ],
-    "neto": [r"\bNeto\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})"],
-    "iva": [r"\bI\.?V\.?A\.?\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})"],
-    "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})"],
-    "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)"],
+    "neto": [
+        r"\bNeto\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)",
+        # Formato "Neto 21.00% $143287.43": hay que saltar la alícuota
+        # (que también tiene forma de monto decimal) antes de llegar al
+        # importe real.
+        r"\bNeto\b[^\d\n]{0,15}\d+[,.]\d{1,2}%\s*[^\d\n]{0,10}([\d\.]+[,.]\d{2})",
+    ],
+    "iva": [
+        r"\bI\.?V\.?A\.?\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)",
+        r"\bI\.?V\.?A\.?\b[^\d\n]{0,15}\d+[,.]\d{1,2}%\s*[^\d\n]{0,10}([\d\.]+[,.]\d{2})",
+    ],
+    "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)"],
+    "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)(?!\s*%)"],
     "cae": [
         r"CAE[A]?\s*N[°ºro.]{1,4}\.?\s*:?\s*(\d{10,15})",
         r"N[uú]mero\s*(?:de\s*)?CAE\s*:?\s*(\d{10,15})",
@@ -174,6 +188,19 @@ def extraer_cabecera(texto: str) -> dict:
         m = re.search(re.escape(resultado["cae"]) + r"[\s\S]{0,60}?(\d{8})\b", texto)
         if m:
             resultado["vencimiento_cae"] = _normalizar_fecha(m.group(1))
+
+    # Salvavidas: si emisor y cliente terminaron con el MISMO CUIT, es
+    # casi seguro un choque (el CUIT real de una de las dos partes no se
+    # pudo leer del texto, y el patrón genérico terminó usando el único
+    # "CUIT:" que sí encontró para ambos campos). Dos partes de una
+    # factura prácticamente nunca comparten CUIT, así que preferimos
+    # anular los dos antes que mostrar uno con confianza estando mal.
+    if (
+        resultado.get("cuit_emisor")
+        and resultado.get("cuit_emisor") == resultado.get("cuit_cliente")
+    ):
+        resultado["cuit_emisor"] = None
+        resultado["cuit_cliente"] = None
 
     return resultado
 
