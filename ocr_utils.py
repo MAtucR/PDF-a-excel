@@ -162,7 +162,14 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     tienen prioridad. El texto de todas las versiones se concatena para
     los regex de cabecera (el primero que matchee gana).
 
-    Devuelve una tupla (ruta_pdf, items, totales, advertencia).
+    Devuelve una tupla (ruta_pdf, items, totales, advertencia, texto).
+
+    `texto` es el texto combinado de TODOS los motores/versiones. Es
+    importante que el llamador lo use para extraer la cabecera: el PDF
+    que se genera lleva solamente la capa de texto de Tesseract sobre la
+    version gris, asi que si la cabecera se extrae unicamente del PDF se
+    pierde todo lo que reconocieron mejor la version binarizada y
+    PaddleOCR.
     """
     advertencia = None
     idioma = "spa" if _hay_idioma_espanol() else None
@@ -316,4 +323,4 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         except Exception:
             pass
 
-    return ruta_pdf_salida, items, totales, advertencia
+    return ruta_pdf_salida, items, totales, advertencia, texto
