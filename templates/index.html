@@ -11,8 +11,9 @@
         button { background: #222; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; }
         button.secondary { background: #eee; color: #333; }
         .flash { background: #fff8e1; border: 1px solid #ffe082; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 0.9rem; }
-        .actions { display: flex; gap: 10px; margin-top: 16px; }
+        .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
         a.btn { text-decoration: none; background: #2e7d32; color: white; padding: 10px 18px; border-radius: 6px; }
+        a.btn.alt { background: #1565c0; }
         .hint { font-size: 0.8rem; color: #666; margin-top: -6px; margin-bottom: 12px; }
     </style>
 </head>
@@ -36,12 +37,20 @@
     </div>
 
     <div class="actions">
+        {% if ultima_existe %}
+            <a class="btn alt" href="/descargar_ultima">⬇️ Descargar última factura</a>
+        {% endif %}
         {% if excel_existe %}
-            <a class="btn" href="/descargar">⬇️ Descargar Excel</a>
+            <a class="btn" href="/descargar">⬇️ Descargar consolidado</a>
         {% endif %}
         <form action="/reiniciar" method="post">
-            <button type="submit" class="secondary">Reiniciar Excel</button>
+            <button type="submit" class="secondary">Reiniciar consolidado</button>
         </form>
+    </div>
+    <div class="hint" style="margin-top: 10px;">
+        "Última factura" trae solo lo que acabás de subir (se reemplaza en
+        cada subida). "Consolidado" acumula todas las facturas que
+        subiste hasta ahora en un único Excel.
     </div>
 </body>
 </html>

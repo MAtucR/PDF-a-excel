@@ -11,6 +11,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 EXCEL_PATH = os.path.join(OUTPUT_DIR, "facturas.xlsx")
+ULTIMA_PATH = os.path.join(OUTPUT_DIR, "ultima_factura.xlsx")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -30,10 +31,12 @@ ITEMS_COLUMNAS = [
 ]
 
 
-def asegurar_excel():
-    """Crea el excel con 2 hojas (Cabeceras / Items) si no existe."""
-    if os.path.exists(EXCEL_PATH):
-        return
+def _crear_libro_con_hojas() -> Workbook:
+    """Arma un Workbook nuevo con las dos hojas (Cabeceras / Items) y
+    sus encabezados de columna, sin ninguna fila de datos todavía. La
+    usan tanto el excel consolidado (que después se recarga y se le va
+    agregando fila por fila) como el de "última factura" (que se arma
+    de cero en cada subida)."""
     wb = Workbook()
     hoja_cab = wb.active
     hoja_cab.title = "Cabeceras"
@@ -42,33 +45,73 @@ def asegurar_excel():
     hoja_items = wb.create_sheet("Items")
     hoja_items.append(ITEMS_COLUMNAS)
 
-    wb.save(EXCEL_PATH)
+    return wb
+
+
+def asegurar_excel():
+    """Crea el excel CONSOLIDADO (con las 2 hojas) si no existe."""
+    if os.path.exists(EXCEL_PATH):
+        return
+    _crear_libro_con_hojas().save(EXCEL_PATH)
+
+
+def _filas_de(nombre_archivo: str, resultado: dict):
+    """Arma la fila de cabecera y las filas de ítems para una factura ya
+    procesada, en el orden de CABECERA_COLUMNAS/ITEMS_COLUMNAS. La
+    comparten agregar_factura_a_excel (consolidado) y
+    guardar_ultima_factura (para no repetir la lógica de armado)."""
+    cab = resultado["cabecera"]
+    fila_cab = [nombre_archivo] + [cab.get(c) for c in CABECERA_COLUMNAS[1:]]
+
+    numero_factura = cab.get("numero_factura")
+    filas_items = [
+        [nombre_archivo, numero_factura] + [item.get(c) for c in ITEMS_COLUMNAS[2:]]
+        for item in resultado["items"]
+    ]
+    return fila_cab, filas_items
 
 
 def agregar_factura_a_excel(nombre_archivo: str, resultado: dict):
+    """Suma esta factura como una fila más al Excel CONSOLIDADO
+    (output/facturas.xlsx): se acumula entre subidas, nunca se pisa."""
     asegurar_excel()
     wb = load_workbook(EXCEL_PATH)
     hoja_cab = wb["Cabeceras"]
     hoja_items = wb["Items"]
 
-    cab = resultado["cabecera"]
-    fila_cab = [nombre_archivo] + [cab.get(c) for c in CABECERA_COLUMNAS[1:]]
+    fila_cab, filas_items = _filas_de(nombre_archivo, resultado)
     hoja_cab.append(fila_cab)
-
-    numero_factura = cab.get("numero_factura")
-    for item in resultado["items"]:
-        fila_item = [nombre_archivo, numero_factura] + [
-            item.get(c) for c in ITEMS_COLUMNAS[2:]
-        ]
+    for fila_item in filas_items:
         hoja_items.append(fila_item)
 
     wb.save(EXCEL_PATH)
 
 
+def guardar_ultima_factura(nombre_archivo: str, resultado: dict):
+    """Guarda un Excel APARTE (output/ultima_factura.xlsx) con solo la
+    factura que se acaba de procesar. A diferencia del consolidado, este
+    archivo se REEMPLAZA por completo en cada subida — sirve para bajar
+    rápido el resultado de la última factura sin tener que filtrar el
+    consolidado ni reiniciarlo."""
+    wb = _crear_libro_con_hojas()
+    hoja_cab = wb["Cabeceras"]
+    hoja_items = wb["Items"]
+
+    fila_cab, filas_items = _filas_de(nombre_archivo, resultado)
+    hoja_cab.append(fila_cab)
+    for fila_item in filas_items:
+        hoja_items.append(fila_item)
+
+    wb.save(ULTIMA_PATH)
+
+
 @app.route("/", methods=["GET"])
 def index():
-    ya_existe = os.path.exists(EXCEL_PATH)
-    return render_template("index.html", excel_existe=ya_existe)
+    return render_template(
+        "index.html",
+        excel_existe=os.path.exists(EXCEL_PATH),
+        ultima_existe=os.path.exists(ULTIMA_PATH),
+    )
 
 
 @app.route("/subir", methods=["POST"])
@@ -125,6 +168,7 @@ def subir():
                 resultado["cabecera"][campo] = limpiar_numero(valor)
 
         agregar_factura_a_excel(archivo.filename, resultado)
+        guardar_ultima_factura(archivo.filename, resultado)
 
         # Solo avisamos de campos que realmente se escriben en el Excel
         # (algunas claves de `cabecera` son internas/auxiliares, como
@@ -171,6 +215,14 @@ def descargar():
         flash("Todavía no se generó ningún Excel.")
         return redirect(url_for("index"))
     return send_file(EXCEL_PATH, as_attachment=True, download_name="facturas.xlsx")
+
+
+@app.route("/descargar_ultima")
+def descargar_ultima():
+    if not os.path.exists(ULTIMA_PATH):
+        flash("Todavía no procesaste ninguna factura en esta sesión.")
+        return redirect(url_for("index"))
+    return send_file(ULTIMA_PATH, as_attachment=True, download_name="ultima_factura.xlsx")
 
 
 @app.route("/reiniciar", methods=["POST"])
