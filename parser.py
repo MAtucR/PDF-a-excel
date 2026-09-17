@@ -140,7 +140,9 @@ def extraer_cabecera(texto: str) -> dict:
 # 2. TABLA DE ÍTEMS — pdfplumber extract_table + fallback heurístico
 # ---------------------------------------------------------------------------
 
-# Encabezados típicos que suelen aparecer en la fila de título de la tabla
+# Encabezados típicos que suelen aparecer en la fila de título de la tabla.
+# También los usa ocr_items.py para detectar la fila de encabezado en
+# fotos (a partir de palabras sueltas reconocidas por OCR).
 ITEM_HEADER_HINTS = ["sku", "codigo", "código", "descripcion", "descripción",
                      "cantidad", "cant", "unitario", "precio", "subtotal", "iva"]
 
@@ -225,7 +227,11 @@ def _normalizar_header(nombre: str):
         "descripcion": "descripcion", "descripción": "descripcion",
         "cantidad": "cantidad", "cant": "cantidad", "cant.": "cantidad",
         "unitario": "precio_unitario", "precio unitario": "precio_unitario",
-        "descuento": "descuento",
+        # Facturas pre-impresas de distribuidoras suelen tener una sola
+        # columna "Precio" (sin la palabra "unitario") y "Dto" en vez de
+        # "Descuento".
+        "precio": "precio_unitario",
+        "descuento": "descuento", "dto": "descuento",
         "neto": "neto",
         "interno": "interno", "internos": "interno",
         "iva": "iva",

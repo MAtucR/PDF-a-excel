@@ -1,7 +1,10 @@
 """
 Convierte fotos/imágenes de facturas (jpg, png, etc.) en un PDF con una
 capa de texto OCR superpuesta, para poder reusar TAL CUAL el mismo
-pipeline de extracción que ya existe en parser.py para PDFs digitales.
+pipeline de extracción de CABECERA que ya existe en parser.py para PDFs
+digitales. Además, reconstruye la tabla de ítems por posición de
+palabras (ver ocr_items.py), ya que una foto no tiene líneas de tabla
+reales y pdfplumber.extract_tables() no encuentra nada ahí.
 
 Requiere tener instalado el BINARIO de Tesseract OCR en el sistema
 operativo (no alcanza con el paquete de Python `pytesseract`, que es
@@ -13,6 +16,8 @@ README, sección "OCR para fotos/imágenes".
 """
 import pytesseract
 from PIL import Image, ImageOps
+
+from ocr_items import extraer_items_desde_imagen
 
 # Extensiones de imagen que la app acepta además de .pdf
 EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
@@ -63,16 +68,19 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
 def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_texto_debug: str = None):
     """
     Toma la ruta de una imagen, le corre OCR y genera en `ruta_pdf_salida`
-    un PDF con la imagen + el texto reconocido superpuesto (un PDF
-    "buscable"). Ese PDF se pasa directo a `parser.procesar_factura()`.
+    un PDF con la imagen + el texto reconocido superpuesto. Además
+    reconstruye la tabla de ítems por posición de palabras.
 
     Si se pasa `ruta_texto_debug`, también guarda ahí el texto plano que
     reconoció el OCR, útil para diagnosticar cuando fallan campos.
 
-    Devuelve una tupla (ruta_pdf, advertencia). `advertencia` es None si
-    todo salió bien, o un mensaje para mostrarle al usuario si el
-    reconocimiento corrió en inglés por faltar el paquete de idioma
-    español (lo cual explica que fallen muchos/todos los campos).
+    Devuelve una tupla (ruta_pdf, items, advertencia):
+    - items: lista de dicts con los ítems reconstruidos (puede ser []
+      si no se pudo detectar la tabla).
+    - advertencia: None si todo salió bien, o un mensaje para mostrarle
+      al usuario si el reconocimiento corrió en inglés por faltar el
+      paquete de idioma español (lo cual explica que fallen muchos/todos
+      los campos).
     """
     advertencia = None
     idioma = "spa" if _hay_idioma_espanol() else None
@@ -89,22 +97,30 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
 
     with Image.open(ruta_imagen) as imagen_original:
         imagen = _preprocesar(imagen_original)
+        lang_usado = idioma or "eng"
 
         try:
             pdf_bytes = pytesseract.image_to_pdf_or_hocr(
-                imagen, extension="pdf", lang=idioma or "eng"
+                imagen, extension="pdf", lang=lang_usado
             )
-            texto = pytesseract.image_to_string(imagen, lang=idioma or "eng")
+            texto = pytesseract.image_to_string(imagen, lang=lang_usado)
         except pytesseract.TesseractError:
-            # Último recurso: dejar que tesseract use su idioma por defecto.
+            lang_usado = None
             pdf_bytes = pytesseract.image_to_pdf_or_hocr(imagen, extension="pdf")
             texto = pytesseract.image_to_string(imagen)
             if advertencia is None:
                 advertencia = (
-                    "No se pudo usar el idioma español para el OCR (revisa "
+                    "No se pudo usar el idioma español para el OCR (revisá "
                     "que 'spa' esté bien instalado); se usó el idioma por "
                     "defecto de Tesseract."
                 )
+
+        try:
+            items = extraer_items_desde_imagen(imagen, lang=lang_usado or "eng")
+        except Exception:
+            # La reconstrucción de ítems es un heurístico best-effort: si
+            # falla, seguimos con la cabecera igual (no interrumpe el flujo).
+            items = []
 
     with open(ruta_pdf_salida, "wb") as f:
         f.write(pdf_bytes)
@@ -113,4 +129,4 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
         with open(ruta_texto_debug, "w", encoding="utf-8") as f:
             f.write(texto)
 
-    return ruta_pdf_salida, advertencia
+    return ruta_pdf_salida, items, advertencia
