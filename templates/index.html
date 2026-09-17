@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Facturas → Excel</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 640px; margin: 60px auto; color: #222; }
+        h1 { font-size: 1.4rem; }
+        .box { border: 1px solid #ddd; border-radius: 8px; padding: 24px; margin-top: 20px; }
+        input[type=file] { margin-bottom: 12px; display: block; }
+        button { background: #222; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; }
+        button.secondary { background: #eee; color: #333; }
+        .flash { background: #fff8e1; border: 1px solid #ffe082; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 0.9rem; }
+        .actions { display: flex; gap: 10px; margin-top: 16px; }
+        a.btn { text-decoration: none; background: #2e7d32; color: white; padding: 10px 18px; border-radius: 6px; }
+    </style>
+</head>
+<body>
+    <h1>📄 Facturas PDF → Excel</h1>
+
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            {% for m in messages %}
+                <div class="flash">{{ m }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <div class="box">
+        <form action="/subir" method="post" enctype="multipart/form-data">
+            <input type="file" name="factura" accept="application/pdf" required>
+            <button type="submit">Subir y procesar</button>
+        </form>
+    </div>
+
+    <div class="actions">
+        {% if excel_existe %}
+            <a class="btn" href="/descargar">⬇️ Descargar Excel</a>
+        {% endif %}
+        <form action="/reiniciar" method="post">
+            <button type="submit" class="secondary">Reiniciar Excel</button>
+        </form>
+    </div>
+</body>
+</html>
