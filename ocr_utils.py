@@ -19,9 +19,10 @@ README, sección "OCR para fotos/imágenes".
 import json
 import re
 
+import numpy as np
 import pytesseract
 from pytesseract import Output
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 
 from ocr_items import extraer_items_desde_imagen, agrupar_en_lineas
 from ocr_totales import extraer_totales_desde_imagen
@@ -34,6 +35,13 @@ EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 # suelen quedar con poca resolución efectiva sobre las letras, y eso
 # arruina el reconocimiento.
 ANCHO_MINIMO_OCR = 2200
+
+# Rango (en grados, hacia cada lado) donde buscamos inclinaciones CHICAS
+# de la foto (mano no del todo firme, hoja no perfectamente derecha).
+# Los giros grandes (90/180/270) ya los corrige _corregir_rotacion con el
+# OSD de Tesseract; esto es un ajuste fino sobre lo que queda.
+RANGO_DESKEW_GRADOS = 8.0
+PASO_DESKEW_GRADOS = 0.5
 
 
 def es_imagen(nombre_archivo: str) -> bool:
@@ -70,6 +78,44 @@ def _corregir_rotacion(imagen: Image.Image) -> Image.Image:
     return imagen
 
 
+def _detectar_angulo_fino(imagen: Image.Image) -> float:
+    """Busca, dentro de +/- RANGO_DESKEW_GRADOS, el ángulo que mejor
+    endereza las líneas de texto.
+
+    Método (perfil de proyección, sin OpenCV): para cada ángulo
+    candidato, rota una copia CHICA de la imagen (para que la búsqueda
+    sea rápida) y suma, por cada fila de píxeles, cuánta "tinta" oscura
+    hay. Cuando el texto queda bien horizontal, las filas que caen
+    sobre una línea de texto tienen mucha más tinta que las filas entre
+    líneas (el perfil queda "picudo" = varianza alta); cuando está
+    inclinado, todo se emborrona parejo entre filas (varianza baja).
+    Nos quedamos con el ángulo de mayor varianza.
+
+    A diferencia de _corregir_rotacion (que corrige giros de
+    90/180/270 con el OSD de Tesseract), esto corrige inclinaciones
+    chicas típicas de una foto sacada a mano.
+    """
+    miniatura = imagen.copy()
+    miniatura.thumbnail((800, 800))
+
+    mejor_angulo = 0.0
+    mejor_varianza = -1.0
+    angulo = -RANGO_DESKEW_GRADOS
+    while angulo <= RANGO_DESKEW_GRADOS:
+        rotada = miniatura.rotate(
+            angulo, resample=Image.BICUBIC, expand=False, fillcolor=255
+        )
+        arr = 255.0 - np.asarray(rotada, dtype=np.float64)
+        proyeccion = arr.sum(axis=1)
+        varianza = proyeccion.var()
+        if varianza > mejor_varianza:
+            mejor_varianza = varianza
+            mejor_angulo = angulo
+        angulo += PASO_DESKEW_GRADOS
+
+    return mejor_angulo
+
+
 def _preprocesar(imagen: Image.Image) -> Image.Image:
     """Mejoras básicas para fotos sacadas con el celular:
 
@@ -78,18 +124,32 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
       EXIF (fotos reenviadas por WhatsApp, por ejemplo)
     - pasa a escala de grises
     - sube el contraste automáticamente
+    - corrige inclinaciones chicas (deskew fino, ver
+      _detectar_angulo_fino) que quedan después de enderezar los giros
+      grandes — una foto sacada "a mano" rara vez queda perfectamente
+      derecha
     - agranda la imagen si quedó chica, para que el OCR tenga más
       píxeles por letra para trabajar
+    - le da un poco de nitidez (unsharp mask), para compensar fotos
+      levemente borrosas o comprimidas (WhatsApp, etc.)
     """
     imagen = ImageOps.exif_transpose(imagen)
     imagen = imagen.convert("L")
     imagen = ImageOps.autocontrast(imagen)
     imagen = _corregir_rotacion(imagen)
 
+    angulo_fino = _detectar_angulo_fino(imagen)
+    if abs(angulo_fino) >= 0.3:
+        imagen = imagen.rotate(
+            angulo_fino, resample=Image.BICUBIC, expand=True, fillcolor=255
+        )
+
     if imagen.width < ANCHO_MINIMO_OCR:
         factor = ANCHO_MINIMO_OCR / imagen.width
         nuevo_alto = int(imagen.height * factor)
         imagen = imagen.resize((ANCHO_MINIMO_OCR, nuevo_alto), Image.LANCZOS)
+
+    imagen = imagen.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
     return imagen
 
