@@ -19,7 +19,6 @@ README, sección "OCR para fotos/imágenes".
 import json
 import re
 
-import numpy as np
 import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageFilter, ImageOps
@@ -35,13 +34,6 @@ EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 # suelen quedar con poca resolución efectiva sobre las letras, y eso
 # arruina el reconocimiento.
 ANCHO_MINIMO_OCR = 2200
-
-# Rango (en grados, hacia cada lado) donde buscamos inclinaciones CHICAS
-# de la foto (mano no del todo firme, hoja no perfectamente derecha).
-# Los giros grandes (90/180/270) ya los corrige _corregir_rotacion con el
-# OSD de Tesseract; esto es un ajuste fino sobre lo que queda.
-RANGO_DESKEW_GRADOS = 8.0
-PASO_DESKEW_GRADOS = 0.5
 
 
 def es_imagen(nombre_archivo: str) -> bool:
@@ -78,44 +70,6 @@ def _corregir_rotacion(imagen: Image.Image) -> Image.Image:
     return imagen
 
 
-def _detectar_angulo_fino(imagen: Image.Image) -> float:
-    """Busca, dentro de +/- RANGO_DESKEW_GRADOS, el ángulo que mejor
-    endereza las líneas de texto.
-
-    Método (perfil de proyección, sin OpenCV): para cada ángulo
-    candidato, rota una copia CHICA de la imagen (para que la búsqueda
-    sea rápida) y suma, por cada fila de píxeles, cuánta "tinta" oscura
-    hay. Cuando el texto queda bien horizontal, las filas que caen
-    sobre una línea de texto tienen mucha más tinta que las filas entre
-    líneas (el perfil queda "picudo" = varianza alta); cuando está
-    inclinado, todo se emborrona parejo entre filas (varianza baja).
-    Nos quedamos con el ángulo de mayor varianza.
-
-    A diferencia de _corregir_rotacion (que corrige giros de
-    90/180/270 con el OSD de Tesseract), esto corrige inclinaciones
-    chicas típicas de una foto sacada a mano.
-    """
-    miniatura = imagen.copy()
-    miniatura.thumbnail((800, 800))
-
-    mejor_angulo = 0.0
-    mejor_varianza = -1.0
-    angulo = -RANGO_DESKEW_GRADOS
-    while angulo <= RANGO_DESKEW_GRADOS:
-        rotada = miniatura.rotate(
-            angulo, resample=Image.BICUBIC, expand=False, fillcolor=255
-        )
-        arr = 255.0 - np.asarray(rotada, dtype=np.float64)
-        proyeccion = arr.sum(axis=1)
-        varianza = proyeccion.var()
-        if varianza > mejor_varianza:
-            mejor_varianza = varianza
-            mejor_angulo = angulo
-        angulo += PASO_DESKEW_GRADOS
-
-    return mejor_angulo
-
-
 def _preprocesar(imagen: Image.Image) -> Image.Image:
     """Mejoras básicas para fotos sacadas con el celular:
 
@@ -124,25 +78,36 @@ def _preprocesar(imagen: Image.Image) -> Image.Image:
       EXIF (fotos reenviadas por WhatsApp, por ejemplo)
     - pasa a escala de grises
     - sube el contraste automáticamente
-    - corrige inclinaciones chicas (deskew fino, ver
-      _detectar_angulo_fino) que quedan después de enderezar los giros
-      grandes — una foto sacada "a mano" rara vez queda perfectamente
-      derecha
     - agranda la imagen si quedó chica, para que el OCR tenga más
       píxeles por letra para trabajar
     - le da un poco de nitidez (unsharp mask), para compensar fotos
       levemente borrosas o comprimidas (WhatsApp, etc.)
+
+    NOTA: se probó agregar también un deskew fino (corrección de
+    inclinaciones chicas por perfil de proyección) y se revirtió: aunque
+    en teoría ayuda a Tesseract a leer mejor el texto, es contraproducente
+    para ESTE pipeline en particular. La reconstrucción de la tabla de
+    ítems (ocr_items.py) y de la fila de totales (ocr_totales.py) agrupan
+    palabras en la misma fila cuando su coordenada Y difiere menos de un
+    umbral de apenas ~10-15px. Una rotación de solo 1°-1.5° ya desplaza
+    verticalmente la columna IMPORTE (extremo derecho) respecto del SKU
+    (extremo izquierdo) de una misma fila en 20-30px, más que ese umbral
+    — alcanza para que una fila real se reconstruya como dos filas
+    partidas. El riesgo es mayor todavía porque el ángulo se estimaba
+    sobre la foto COMPLETA (incluyendo fondo: mesa, teclado, etc.), no
+    solo la hoja, así que el ángulo detectado podía no ser el real. En
+    los hechos, con una foto real de prueba, esto rompió tanto la tabla
+    de ítems (filas partidas en dos) como la cabecera (etiquetas y
+    valores separados en líneas distintas). Si en el futuro se lo quiere
+    reintentar, hay que hacerlo tolerante a esto: o se opera solo sobre
+    la región de la hoja (no la foto entera), o se hace que el agrupador
+    de líneas tolere un corrimiento vertical proporcional a la distancia
+    horizontal (una recta con pendiente, no un umbral fijo).
     """
     imagen = ImageOps.exif_transpose(imagen)
     imagen = imagen.convert("L")
     imagen = ImageOps.autocontrast(imagen)
     imagen = _corregir_rotacion(imagen)
-
-    angulo_fino = _detectar_angulo_fino(imagen)
-    if abs(angulo_fino) >= 0.3:
-        imagen = imagen.rotate(
-            angulo_fino, resample=Image.BICUBIC, expand=True, fillcolor=255
-        )
 
     if imagen.width < ANCHO_MINIMO_OCR:
         factor = ANCHO_MINIMO_OCR / imagen.width
