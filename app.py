@@ -6,7 +6,7 @@ from werkzeug.utils import secure_filename
 import pytesseract
 
 from parser import (procesar_factura, limpiar_numero, extraer_cabecera,
-                    limpiar_cantidad, limpiar_sku)
+                    limpiar_cantidad, limpiar_sku, validar_montos)
 from ocr_utils import es_imagen, convertir_imagen_a_pdf_ocr
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -234,6 +234,13 @@ def subir():
             )
         if ruta_items_debug and not resultado["items"]:
             mensajes_extra.append("no se detectó la tabla de ítems")
+
+        # Validación aritmética de lo extraído (neto + IVA contra el
+        # total, alícuota implícita del IVA, suma de ítems contra la
+        # cabecera): convierte errores de lectura silenciosos en avisos.
+        # No bloquea la carga — la fila ya se escribió —, solo avisa
+        # qué factura conviene revisar.
+        mensajes_extra.extend(validar_montos(resultado))
 
         if mensajes_extra:
             mensaje = f"Factura cargada, pero {'; '.join(mensajes_extra)}."

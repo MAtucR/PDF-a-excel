@@ -565,3 +565,103 @@ def procesar_factura(pdf_path: str) -> dict:
         "items": items,
         "texto_crudo": texto_completo,
     }
+
+
+# ---------------------------------------------------------------------------
+# 4. Validación aritmética de los montos extraídos
+# ---------------------------------------------------------------------------
+
+# Tolerancia absoluta por redondeos de centavos entre campos.
+_TOLERANCIA = 0.05
+
+
+def _formatear_monto(v) -> str:
+    """Formato argentino para mostrar montos en los avisos: $1.234,56."""
+    texto = f"{v:,.2f}"
+    return "$" + texto.replace(",", "@").replace(".", ",").replace("@", ".")
+
+
+def validar_montos(resultado: dict) -> list:
+    """Chequea que los montos extraídos cierren aritméticamente entre sí
+    y devuelve una lista de advertencias (strings) para mostrarle al
+    usuario; vacía si todo cuadra o si faltan datos para comparar.
+
+    La idea es convertir errores de lectura SILENCIOSOS (un "total" que
+    en realidad agarró otro número de la factura, un ítem que no se
+    leyó) en avisos visibles, sin bloquear la carga: la fila igual se
+    escribe al Excel, pero el usuario sabe que esa factura hay que
+    revisarla.
+
+    Los chequeos son deliberadamente conservadores para no "llorar
+    lobo": se avisa cuando la cuenta es imposible o muy improbable, no
+    cuando simplemente no se puede verificar. Por ejemplo, un total algo
+    mayor que neto + IVA puede ser legítimo (percepciones, impuestos
+    internos, que no se extraen como campos propios), así que ahí solo
+    se avisa si la diferencia es demasiado grande; un total MENOR que
+    neto + IVA, en cambio, no puede pasar nunca.
+    """
+    advertencias = []
+    cab = resultado.get("cabecera") or {}
+    neto = cab.get("neto")
+    iva = cab.get("iva")
+    total = cab.get("total")
+
+    # --- neto + IVA contra el total ---
+    if neto is not None and iva is not None and total is not None:
+        esperado = round(neto + iva, 2)
+        diferencia = round(total - esperado, 2)
+        if diferencia < -_TOLERANCIA:
+            advertencias.append(
+                f"los montos no cuadran: el total ({_formatear_monto(total)}) es "
+                f"MENOR que neto + IVA ({_formatear_monto(esperado)}), lo cual es "
+                "imposible — alguno de los tres se leyó mal"
+            )
+        elif neto > 0 and diferencia > max(_TOLERANCIA, neto * 0.15):
+            # Una diferencia positiva chica es normal (percepciones,
+            # impuestos internos), pero más del 15% del neto ya no se
+            # explica con eso.
+            advertencias.append(
+                f"el total ({_formatear_monto(total)}) es bastante más grande que "
+                f"neto + IVA ({_formatear_monto(esperado)}); si la factura no tiene "
+                "percepciones o impuestos internos altos, algún monto se leyó mal"
+            )
+
+    # --- alícuota implícita del IVA ---
+    if neto is not None and iva is not None and neto > 0:
+        if iva / neto > 0.28:
+            # La alícuota más alta que existe es 27%; con ítems exentos o
+            # no gravados la efectiva solo puede BAJAR, nunca superar eso.
+            advertencias.append(
+                f"el IVA leído ({_formatear_monto(iva)}) es más del 28% del neto "
+                f"({_formatear_monto(neto)}), y la alícuota máxima es 27% — "
+                "probablemente uno de los dos campos se leyó mal"
+            )
+
+    # --- suma de ítems contra la cabecera ---
+    items = resultado.get("items") or []
+    if items:
+        referencias = [v for v in (neto, cab.get("subtotal"), total) if v is not None]
+        if referencias:
+            # Se prueba primero la columna "neto" de los ítems y después
+            # "subtotal" (que según el proveedor puede ser el importe de
+            # línea con o sin IVA); por eso la suma se compara contra
+            # TODAS las referencias de la cabecera y alcanza con que
+            # coincida con alguna.
+            for col in ("neto", "subtotal"):
+                valores = [limpiar_numero(item.get(col)) for item in items]
+                # Solo se compara si TODAS las filas tienen esa columna
+                # legible: con filas incompletas la suma da corta seguro
+                # y el aviso sería ruido (de filas/campos faltantes ya
+                # avisan los otros mensajes de la app).
+                if all(v is not None for v in valores):
+                    suma = round(sum(valores), 2)
+                    tolerancia = max(_TOLERANCIA, 0.02 * len(items))
+                    if not any(abs(suma - ref) <= tolerancia for ref in referencias):
+                        advertencias.append(
+                            f"la suma de los importes de los ítems ({_formatear_monto(suma)}) "
+                            "no coincide con el neto ni con el total de la cabecera — "
+                            "puede faltar un ítem o haber un monto mal leído"
+                        )
+                    break
+
+    return advertencias
