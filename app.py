@@ -2,6 +2,7 @@ import os
 import uuid
 from flask import Flask, request, render_template, send_file, flash, redirect, url_for
 from openpyxl import Workbook, load_workbook
+from werkzeug.utils import secure_filename
 import pytesseract
 
 from parser import (procesar_factura, limpiar_numero, extraer_cabecera,
@@ -152,7 +153,14 @@ def subir():
         flash("El archivo debe ser un PDF o una foto/imagen (jpg, jpeg, png, webp, bmp, tif).")
         return redirect(url_for("index"))
 
-    nombre_unico = f"{uuid.uuid4().hex[:8]}_{archivo.filename}"
+    # secure_filename: el nombre lo manda el cliente y puede traer rutas
+    # ("../../algo.pdf"); sin sanitizarlo se podía escribir fuera de
+    # uploads/. Si queda vacío (nombres muy raros), se conserva al menos
+    # la extensión ya validada.
+    nombre_seguro = secure_filename(archivo.filename)
+    if not nombre_seguro:
+        nombre_seguro = "factura" + os.path.splitext(nombre_lower)[1]
+    nombre_unico = f"{uuid.uuid4().hex[:8]}_{nombre_seguro}"
     ruta_original = os.path.join(UPLOAD_DIR, nombre_unico)
     archivo.save(ruta_original)
 
@@ -242,7 +250,13 @@ def subir():
     except pytesseract.TesseractNotFoundError:
         flash(
             "No se encontró el programa Tesseract OCR instalado en el sistema. "
-            "Revás la sección 'OCR para fotos/imágenes' en el README para instalarlo."
+            "Revisá la sección 'OCR para fotos/imágenes' en el README para instalarlo."
+        )
+    except PermissionError:
+        flash(
+            "No se pudo escribir el Excel: casi seguro lo tenés abierto en "
+            "Excel (Windows bloquea el archivo mientras está abierto). "
+            "Cerralo y volvé a subir la factura."
         )
     except Exception as e:
         flash(f"Error procesando el archivo: {e}")
@@ -270,6 +284,10 @@ def descargar_ultima():
 def reiniciar():
     if os.path.exists(EXCEL_PATH):
         os.remove(EXCEL_PATH)
+    # También el de "última factura": si queda, el botón de descarga
+    # sigue bajando una factura de antes del reinicio.
+    if os.path.exists(ULTIMA_PATH):
+        os.remove(ULTIMA_PATH)
     flash("Excel reiniciado.")
     return redirect(url_for("index"))
 

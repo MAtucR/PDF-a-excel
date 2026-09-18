@@ -81,7 +81,15 @@ HEADER_PATTERNS = {
         r"\bI\.?V\.?A\.?\b[^\d\n]{0,15}\d+[,.]\d{1,2}%\s*[^\d\n]{0,10}([\d\.]+[,.]\d{2})",
     ],
     "subtotal": [r"\bSubTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*%)"],
-    "total": [r"\bTotal\b[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)(?!\s*%)"],
+    "total": [
+        # (?!\s*Neto): "TOTAL NETO 211.362,27" no es el total de la
+        # factura, es el neto — sin este lookahead este patrón se llevaba
+        # ese importe. Además el campo se resuelve con la ÚLTIMA
+        # ocurrencia del documento y no la primera (ver
+        # CAMPOS_ULTIMA_OCURRENCIA): el total final viene después de los
+        # subtotales por página, "Total Neto", transportes, etc.
+        r"\bTotal\b(?!\s*Neto\b)[^\d\n]{0,10}([\d\.]+[,.]\d{2})(?!\s*\d)(?!\s*%)",
+    ],
     "cae": [
         r"C\.?A\.?E\.?[A]?\s*N[º°ro.]{1,4}\.?\s*:?\s*(\d{10,15})",
         r"N[uú]mero\s*(?:de\s*)?C\.?A\.?E\.?\s*:?\s*(\d{10,15})",
@@ -89,13 +97,24 @@ HEADER_PATTERNS = {
         r"C\.?A\.?E\.?\s*:?\s*(\d{10,15})",
     ],
     "vencimiento_cae": [
+        # Los patrones ESPECÍFICOS de CAE van primero: muchas facturas
+        # tienen un "Vencimiento: dd/mm/aaaa" de PAGO antes del del CAE,
+        # y como se usa el primer patrón que matchea, con el genérico
+        # adelante se guardaba la fecha equivocada. Se tolera también el
+        # formato AFIP "Fecha de Vto. de CAE".
+        r"Vto\.?\s*(?:de\s*)?C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
+        r"VENC\.?\s*(?:de\s*)?C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
         r"Vencimiento\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
         r"Vencimiento\s*:?\s*(\d{8})\b",
-        r"Vto\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
-        r"VENC\.?\s*C\.?A\.?E\.?\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{4})",
     ],
     "punto_venta": [r"\b(\d{4})-\d{7,8}\b"],
 }
+
+# Campos donde importa la ÚLTIMA ocurrencia del patrón en el texto y no
+# la primera. El caso concreto es "total": en el texto de una factura
+# suele haber varios "Total ..." (Total Neto, totales parciales,
+# transporte entre páginas) y el total de verdad es el último.
+CAMPOS_ULTIMA_OCURRENCIA = {"total"}
 
 
 def limpiar_numero(value):
@@ -105,9 +124,9 @@ def limpiar_numero(value):
     sistemas de facturación aunque no sea lo habitual en Argentina).
 
     Tolera además dos deformaciones típicas del OCR sobre fotos:
-    el separador decimal leído como espacio ("1781 00"), y la coma de
+    el separador decimal leído como espacio (\"1781 00\"), y la coma de
     miles leída como punto, que deja el número con DOS puntos
-    ("9.722.83" por "9.722,83").
+    (\"9.722.83\" por \"9.722,83\").
     """
     if not value:
         return None
@@ -246,8 +265,12 @@ def _resolver_colision_emisor_cliente(resultado, texto, campo_emisor, campo_clie
     elif ocurrencia and re.search(r"\bCONSUMIDOR\s+FINAL\b", texto, re.IGNORECASE):
         resultado[campo_cliente] = None
     else:
+        # Cuando no hay contexto para decidir, antes se anulaban los DOS
+        # campos y se perdia un valor que si se habia leido bien. El del
+        # emisor no se exporta al Excel, asi que lo barato es anular solo
+        # ese y conservar el del cliente (que es la columna que se
+        # escribe).
         resultado[campo_emisor] = None
-        resultado[campo_cliente] = None
 
 
 def extraer_cabecera(texto: str) -> dict:
@@ -258,11 +281,42 @@ def extraer_cabecera(texto: str) -> dict:
 
         valor = None
         for patron in patrones:
-            m = re.search(patron, texto, re.IGNORECASE)
+            if campo in CAMPOS_ULTIMA_OCURRENCIA:
+                matches = list(re.finditer(patron, texto, re.IGNORECASE))
+                m = matches[-1] if matches else None
+            else:
+                m = re.search(patron, texto, re.IGNORECASE)
             if m:
                 valor = m.group(m.lastindex).strip()
                 break
         resultado[campo] = valor
+
+    # CUIT por POSICIÓN: los patrones de cuit_emisor y cuit_cliente son
+    # casi iguales, así que con re.search los dos capturaban la MISMA
+    # (primera) ocurrencia y después había que adivinar de quién era
+    # (y en el peor caso se anulaban los dos, perdiendo un CUIT bien
+    # leído). En las facturas argentinas el CUIT del emisor aparece
+    # siempre antes que el del cliente, así que: primera ocurrencia
+    # completa = emisor, y la siguiente con un valor DISTINTO = cliente.
+    patron_cuit = r"C\.?U\.?I\.?T\.?\s*[:;]?\s*(\d{2}[-\s]?\d{8}[-\s]?\d{1})"
+    cuits_vistos = []
+    digitos_vistos = set()
+    for m in re.finditer(patron_cuit, texto, re.IGNORECASE):
+        valor_cuit = m.group(1)
+        solo_digitos = re.sub(r"\D", "", valor_cuit)
+        if solo_digitos not in digitos_vistos:
+            digitos_vistos.add(solo_digitos)
+            cuits_vistos.append(valor_cuit)
+    if cuits_vistos:
+        resultado["cuit_emisor"] = cuits_vistos[0]
+        if len(cuits_vistos) > 1:
+            resultado["cuit_cliente"] = cuits_vistos[1]
+        elif resultado.get("cuit_cliente") and \
+                re.sub(r"\D", "", resultado["cuit_cliente"]) == re.sub(r"\D", "", cuits_vistos[0]):
+            # Hay un solo CUIT en toda la factura: es el del emisor. (Si
+            # el patrón corto de cuit_cliente —códigos de 6 a 11 dígitos—
+            # capturó otra cosa distinta, eso se respeta.)
+            resultado["cuit_cliente"] = None
 
     if resultado.get("numero_factura"):
         resultado["numero_factura"] = re.sub(r"\s+", "", resultado["numero_factura"])
@@ -281,15 +335,20 @@ def extraer_cabecera(texto: str) -> dict:
         if m:
             resultado["vencimiento_cae"] = _normalizar_fecha(m.group(1))
 
-    _resolver_colision_emisor_cliente(
-        resultado, texto, "cuit_emisor", "cuit_cliente",
-        r"C\.?U\.?I\.?T\.?\s*[:;]?\s*{valor}",
+    # Factura A: emisor y cliente son AMBOS Responsable Inscripto por
+    # definición de AFIP, así que que las dos condiciones coincidan no
+    # es una colisión a resolver sino el caso normal.
+    es_factura_a_ri = (
+        resultado.get("tipo_comprobante") == "A"
+        and resultado.get("condicion_iva_cliente")
+        and "INSCRIPTO" in resultado["condicion_iva_cliente"].upper()
     )
-    _resolver_colision_emisor_cliente(
-        resultado, texto, "condicion_iva_emisor", "condicion_iva_cliente",
-        r"IVA\s*:?\s*{valor}",
-        valores_siempre_cliente={"CONSUMIDOR FINAL"},
-    )
+    if not es_factura_a_ri:
+        _resolver_colision_emisor_cliente(
+            resultado, texto, "condicion_iva_emisor", "condicion_iva_cliente",
+            r"IVA\s*:?\s*{valor}",
+            valores_siempre_cliente={"CONSUMIDOR FINAL"},
+        )
 
     return resultado
 
@@ -311,16 +370,53 @@ ITEM_HEADER_HINTS = ["sku", "codigo", "código", "descripcion", "descripción",
                      "akticulo", "articulo", "artículo",
                      "unit", "desc", "meto"]
 
+# Subconjunto de hints que solo aparecen en el encabezado de la tabla de
+# ÍTEMS y nunca en la fila de totales del pie. Sin esta distinción, el
+# encabezado de la tabla de TOTALES ("TOTAL NETO | IVA | SUBTOTAL |
+# TOTAL") junta 2+ hits de los hints genéricos (neto, iva, subtotal...),
+# se lo trataba como encabezado de ítems, y la fila de valores de abajo
+# entraba al Excel como un ítem fantasma con solo montos.
+ITEM_HEADER_HINTS_ESPECIFICOS = [
+    "sku", "codigo", "código", "cob1go", "cobigo", "cod1go", "codlgo",
+    "descripcion", "descripción", "desc",
+    "articulo", "artículo", "akticulo",
+    "cantidad", "cant", "unitario", "unit",
+]
+
 
 def _fila_es_encabezado(fila: list) -> bool:
     texto_fila = " ".join([c or "" for c in fila]).lower()
     hits = sum(1 for hint in ITEM_HEADER_HINTS if hint in texto_fila)
-    return hits >= 2
+    tiene_especifico = any(h in texto_fila for h in ITEM_HEADER_HINTS_ESPECIFICOS)
+    return hits >= 2 and tiene_especifico
 
 
 def _fila_es_totales(fila: list) -> bool:
     texto_fila = " ".join([c or "" for c in fila]).lower()
     return "total" in texto_fila and not any(c and c.strip().isdigit() for c in fila[:1])
+
+
+def ajustar_columna_desc(nombres: list, crudos: list) -> list:
+    """Resuelve la ambigüedad de la abreviatura "DESC"/"DESC.": puede
+    abreviar DESCUENTO o DESCRIPCIÓN. _normalizar_header la mapea a
+    descuento, que es lo correcto cuando la tabla además tiene su propia
+    columna de descripción; pero si NO hay ninguna columna de
+    descripción en el encabezado, la abreviatura era de la descripción,
+    y sin este ajuste todos los textos de los ítems caían en la columna
+    "descuento" del Excel.
+
+    `nombres` son los encabezados ya normalizados y `crudos` los textos
+    originales de esas mismas celdas (en el mismo orden), para tocar
+    solo las columnas que vinieron de la abreviatura ambigua y no un
+    "Descuento" escrito entero."""
+    if "descripcion" in nombres:
+        return nombres
+    ajustados = list(nombres)
+    for i, (nombre, crudo) in enumerate(zip(ajustados, crudos)):
+        if nombre == "descuento" and crudo and re.fullmatch(
+                r"desc\.?", str(crudo).strip(), re.IGNORECASE):
+            ajustados[i] = "descripcion"
+    return ajustados
 
 
 def extraer_items(pdf_path: str) -> list:
@@ -340,7 +436,9 @@ def extraer_items(pdf_path: str) -> list:
                 if header_idx is None:
                     continue
 
-                headers = [(_normalizar_header(c)) for c in tabla[header_idx]]
+                headers_crudos = tabla[header_idx]
+                headers = [(_normalizar_header(c)) for c in headers_crudos]
+                headers = ajustar_columna_desc(headers, headers_crudos)
 
                 for fila in tabla[header_idx + 1:]:
                     if _fila_es_totales(fila):
@@ -394,6 +492,10 @@ def _normalizar_header(nombre: str):
     una columna separada, "del" y "articulo" (y sus variantes OCR) se
     mapean a "descripcion" para que las palabras de datos que caigan en
     esos rangos se concatenen en el campo correcto.
+
+    OJO con "desc": acá se mapea a descuento, pero es ambiguo (también
+    abrevia "descripción"). La desambiguación por contexto la hace
+    ajustar_columna_desc, mirando el encabezado completo.
     """
     if not nombre:
         return None

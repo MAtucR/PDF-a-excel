@@ -78,6 +78,13 @@ def _campo_de_columna(etiqueta: str):
 
 def _es_numero(token: str) -> bool:
     t = token.strip()
+    # Sin al menos un dígito no es un número: el OCR suelta tokens de
+    # pura puntuación (".", ",", "-") como ruido, y como la tercera
+    # alternativa del regex los matcheaba, contaban como "número",
+    # ocupaban una columna vía setdefault y BLOQUEABAN el valor real de
+    # esa columna (que después quedaba vacía en el Excel).
+    if not any(ch.isdigit() for ch in t):
+        return False
     return bool(re.fullmatch(r"-?[\d.]+,\d{2}", t) or re.fullmatch(r"-?\d+(\.\d+)?%?", t)
                 or re.fullmatch(r"-?[\d.,]+", t))
 

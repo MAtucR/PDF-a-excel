@@ -25,7 +25,8 @@ resultante cuando el origen es una foto.
 import pytesseract
 from pytesseract import Output
 
-from parser import ITEM_HEADER_HINTS, _normalizar_header
+from parser import (ITEM_HEADER_HINTS, ITEM_HEADER_HINTS_ESPECIFICOS,
+                    _normalizar_header, ajustar_columna_desc)
 
 CONFIANZA_MINIMA = 25  # descarta palabras que el OCR reconoció con muy poca confianza
 
@@ -103,7 +104,16 @@ def _es_linea_encabezado(linea: list) -> bool:
         1 for p in linea
         if any(hint in p["texto"].lower() for hint in ITEM_HEADER_HINTS)
     )
-    return hits >= 2
+    # Igual que parser._fila_es_encabezado: se exige al menos un hint
+    # ESPECÍFICO de ítems (código/descripción/cantidad/unitario...) para
+    # no confundir el encabezado de la fila de TOTALES del pie
+    # ("TOTAL NETO IVA ... TOTAL", que junta 2+ hits genéricos) con el
+    # encabezado de la tabla de ítems.
+    tiene_especifico = any(
+        any(h in p["texto"].lower() for h in ITEM_HEADER_HINTS_ESPECIFICOS)
+        for p in linea
+    )
+    return hits >= 2 and tiene_especifico
 
 
 def _es_linea_totales(linea: list) -> bool:
@@ -142,15 +152,23 @@ def extraer_items_desde_imagen(imagen, lang: str = "spa", datos: dict = None) ->
         return []
 
     linea_encabezado = lineas[idx_encabezado]
-    columnas = []  # lista de (nombre_columna, centro_x), ordenada por centro_x
+    # Se juntan nombre normalizado, texto original y posición de cada
+    # palabra del encabezado; el texto original hace falta para poder
+    # desambiguar la abreviatura "DESC" (descuento vs descripción) con
+    # el contexto del encabezado completo (ver ajustar_columna_desc).
+    nombres = []
+    crudos = []
+    posiciones = []
     for palabra in linea_encabezado:
         nombre = _normalizar_header(palabra["texto"])
         if nombre:
-            columnas.append((nombre, palabra["centro_x"]))
+            nombres.append(nombre)
+            crudos.append(palabra["texto"])
+            posiciones.append(palabra["centro_x"])
+    nombres = ajustar_columna_desc(nombres, crudos)
+    columnas = sorted(zip(nombres, posiciones), key=lambda c: c[1])
     if not columnas:
         return []
-
-    columnas.sort(key=lambda c: c[1])
 
     # Límites (bins) entre columnas: el punto medio entre cada par de
     # encabezados consecutivos, con extremos abiertos a los costados.
