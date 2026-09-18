@@ -98,15 +98,33 @@ HEADER_PATTERNS = {
 }
 
 
-def limpiar_numero(value: str):
+def limpiar_numero(value):
     """Convierte un monto de texto a float, detectando automáticamente si
     usa el formato argentino (punto de miles, coma decimal: '13.175,99')
     o el formato con punto decimal ('143287.43', común en algunos
     sistemas de facturación aunque no sea lo habitual en Argentina).
+
+    Tolera además dos deformaciones típicas del OCR sobre fotos:
+    el separador decimal leído como espacio ("1781 00"), y la coma de
+    miles leída como punto, que deja el número con DOS puntos
+    ("9.722.83" por "9.722,83").
     """
     if not value:
         return None
-    v = value.strip()
+    v = str(value).strip()
+
+    # El OCR a veces lee el separador decimal como un ESPACIO
+    # ("1781 00" en vez de "1781.00"). Si lo que queda despues del
+    # espacio son exactamente 2 digitos y el resto son digitos, lo
+    # tratamos como el decimal.
+    m = re.fullmatch(r"([\d.,]+)\s+(\d{2})", v)
+    if m and any(ch.isdigit() for ch in m.group(1)):
+        v = f"{m.group(1)}.{m.group(2)}"
+
+    v = v.replace(" ", "")
+    if not v:
+        return None
+
     try:
         if "," in v and "." in v:
             if v.rfind(",") > v.rfind("."):
@@ -114,14 +132,70 @@ def limpiar_numero(value: str):
             else:
                 v = v.replace(",", "")
         elif "," in v:
-            v = v.replace(".", "").replace(",", ".")
+            partes = v.split(",")
+            if len(partes[-1]) == 2 or len(partes) == 2:
+                v = "".join(partes[:-1]) + "." + partes[-1]
+            else:
+                v = v.replace(",", "")
         elif "." in v:
+            # Puede venir con MAS DE UN punto: el OCR confunde la coma de
+            # miles con un punto ("9.722.83" por "9.722,83"). En ese caso
+            # los puntos de adelante son separadores de miles y el ultimo
+            # es el decimal, siempre que deje 2 digitos atras
+            # ("255.748.34" -> 255748.34). Si el ultimo grupo no tiene 2
+            # digitos, son todos separadores de miles ("1.234.567").
             partes = v.split(".")
-            if len(partes[-1]) != 2:
+            if len(partes[-1]) == 2:
+                v = "".join(partes[:-1]) + "." + partes[-1]
+            else:
                 v = v.replace(".", "")
         return float(v)
     except ValueError:
         return None
+
+
+def limpiar_cantidad(value):
+    """Convierte la CANTIDAD de un item a numero.
+
+    Va aparte de limpiar_numero porque estas facturas escriben las
+    cantidades con TRES decimales ("1.000" es 1, no mil; "24.000" es 24),
+    al reves de lo que asumiria un parser de montos.
+
+    Ademas la celda suele venir contaminada con texto de la columna de
+    al lado, porque la descripcion se desborda sobre la de cantidad
+    ("LEI- 24.000", "(X20) 20.000", "100 12.000"). Por eso nos quedamos
+    con el ULTIMO token que parezca una cantidad: el sobrante de la
+    descripcion siempre queda a la izquierda.
+    """
+    if value is None:
+        return None
+    texto = str(value)
+
+    # Tokens con forma de cantidad de 3 decimales: 1.000 / 24,000
+    candidatos = re.findall(r"\d+[.,]\d{3}\b", texto)
+    if candidatos:
+        elegido = candidatos[-1]
+        try:
+            return float(elegido.replace(",", ".").replace(".", "", elegido.count(".") - 1)
+                         if elegido.count(".") > 1 else elegido.replace(",", "."))
+        except ValueError:
+            return None
+
+    # Si no, el ultimo numero suelto que haya
+    sueltos = re.findall(r"\d+(?:[.,]\d+)?", texto)
+    if sueltos:
+        return limpiar_numero(sueltos[-1])
+    return None
+
+
+def limpiar_sku(value):
+    """Se queda con el codigo de articulo, descartando el texto de la
+    descripcion que el OCR pego en la misma celda ("312040 AERR",
+    "333916 /PILA", "210015 /")."""
+    if value is None:
+        return None
+    m = re.search(r"\d{4,}", str(value))
+    return m.group(0) if m else (str(value).strip() or None)
 
 
 def _normalizar_fecha(valor):
