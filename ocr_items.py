@@ -71,6 +71,7 @@ def agrupar_en_lineas(datos: dict) -> list:
             "texto": texto,
             "top": top,
             "height": height,
+            "width": width,
             "centro_y": top + height / 2,
             "centro_x": left + width / 2,
         })
