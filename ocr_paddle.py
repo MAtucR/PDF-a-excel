@@ -113,7 +113,19 @@ def _obtener_ocr(lang: str = "es"):
     #    inferencia real antes de dar por buena una configuracion.
     #    (Verificado con diagnostico_paddle2.py sobre paddleocr 3.7.0 +
     #    paddlepaddle 3.3.1 en Windows: sin oneDNN anda, con oneDNN no.)
+    #
+    # use_doc_orientation_classify / use_doc_unwarping: PaddleOCR 3.x
+    # carga por defecto modelos extra que enderezan y "des-deforman" la
+    # pagina antes de leerla (PP-LCNet_x1_0_doc_ori y UVDoc). Este
+    # proyecto YA hace eso antes, en escaner.enderezar_documento (recorte
+    # y correccion de perspectiva) y en ocr_utils._corregir_rotacion
+    # (giros de 90/180/270 via OSD de Tesseract), asi que son trabajo
+    # duplicado: se apagan porque son de los pasos mas lentos del
+    # pipeline, sobre todo con enable_mkldnn=False (sin aceleracion).
+    rapido = dict(use_doc_orientation_classify=False, use_doc_unwarping=False)
     intentos = [
+        dict(lang=lang, use_textline_orientation=True, enable_mkldnn=False, **rapido),
+        dict(lang=lang, enable_mkldnn=False, **rapido),
         dict(lang=lang, use_textline_orientation=True, enable_mkldnn=False),
         dict(lang=lang, use_angle_cls=True, enable_mkldnn=False),
         dict(lang=lang, enable_mkldnn=False),
@@ -272,11 +284,18 @@ def datos_estilo_tesseract(imagen, lang: str = "es", confianza_minima: float = 0
     return datos
 
 
-def texto_plano(imagen, lang: str = "es", confianza_minima: float = 0.3) -> str:
+def texto_plano(imagen, lang: str = "es", confianza_minima: float = 0.3,
+                datos: dict = None) -> str:
     """Texto reconocido por PaddleOCR, agrupado en líneas por cercanía
     vertical, para alimentar los regex de cabecera de parser.py.
-    Devuelve "" si PaddleOCR no está disponible."""
-    datos = datos_estilo_tesseract(imagen, lang=lang, confianza_minima=confianza_minima)
+    Devuelve "" si PaddleOCR no está disponible.
+
+    IMPORTANTE: pasarle `datos` (el resultado de una llamada previa a
+    datos_estilo_tesseract) si ya se hizo el OCR de esa imagen. Sin eso
+    se vuelve a correr el modelo entero sobre la misma imagen, que es el
+    paso mas caro de todo el pipeline y duplica el tiempo de proceso."""
+    if datos is None:
+        datos = datos_estilo_tesseract(imagen, lang=lang, confianza_minima=confianza_minima)
     if not datos["text"]:
         return ""
 

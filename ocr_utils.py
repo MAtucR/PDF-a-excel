@@ -157,10 +157,10 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
     ENFOQUE MULTI-MOTOR: genera dos versiones de la imagen preprocesada
     — una en escala de grises (mejor para cabecera) y otra binarizada
     con umbral adaptativo tipo scanner (mejor para tabla de ítems y
-    totales) — y corre Tesseract sobre ambas. Si PaddleOCR está
-    disponible, también corre sobre la versión gris y sus resultados
-    tienen prioridad. El texto de todas las versiones se concatena para
-    los regex de cabecera (el primero que matchee gana).
+    totales). Si PaddleOCR está disponible corre sobre la version gris
+    y sus resultados tienen prioridad; las pasadas de Tesseract que
+    quedan redundantes se saltean para no gastar tiempo al pedo (cada
+    pasada son varios segundos sobre una imagen de 2200x3588).
 
     Devuelve una tupla (ruta_pdf, items, totales, advertencia, texto).
 
@@ -207,12 +207,6 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
                     "defecto de Tesseract."
                 )
 
-        # --- OCR sobre la versión BINARIZADA (mejor para ítems/totales) ---
-        try:
-            texto_bin = pytesseract.image_to_string(binaria, lang=lang_usado or "eng")
-        except pytesseract.TesseractError:
-            texto_bin = pytesseract.image_to_string(binaria)
-
         # --- OCR con PaddleOCR, si está disponible ---
         # PaddleOCR trabaja mejor sobre la imagen en GRIS/color que sobre
         # la binarizada: sus modelos fueron entrenados con fotos reales,
@@ -224,7 +218,10 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
             try:
                 datos_paddle = ocr_paddle.datos_estilo_tesseract(gris)
                 if datos_paddle and datos_paddle.get("text"):
-                    texto_paddle = ocr_paddle.texto_plano(gris)
+                    # Le pasamos los datos ya calculados: sin esto
+                    # texto_plano vuelve a correr el modelo entero sobre
+                    # la misma imagen y duplica el tiempo de proceso.
+                    texto_paddle = ocr_paddle.texto_plano(gris, datos=datos_paddle)
                 else:
                     datos_paddle = None
             except Exception:
@@ -242,6 +239,17 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
                     f"(corre 'python diagnostico_paddle.py' para mas detalle)"
                 )
                 advertencia = f"{advertencia} | {aviso}" if advertencia else aviso
+
+        # --- OCR sobre la versión BINARIZADA (mejor para ítems/totales) ---
+        # Solo si PaddleOCR no corrio: cuando Paddle anduvo, su texto es
+        # mejor que el de esta pasada y correrla igual son ~4-8s tirados
+        # por factura.
+        texto_bin = ""
+        if datos_paddle is None:
+            try:
+                texto_bin = pytesseract.image_to_string(binaria, lang=lang_usado or "eng")
+            except pytesseract.TesseractError:
+                texto_bin = pytesseract.image_to_string(binaria)
 
         # Texto combinado: las versiones de Tesseract (gris + binarizada)
         # más la de PaddleOCR si corrió. Los regex de cabecera
@@ -284,17 +292,22 @@ def convertir_imagen_a_pdf_ocr(ruta_imagen: str, ruta_pdf_salida: str, ruta_text
             except Exception:
                 totales = {}
 
-        if not totales:
+        # Fallbacks con Tesseract: solo si Paddle no corrio. Cuando
+        # Paddle anduvo y aun asi no encontro la fila de totales, es
+        # porque esta factura no tiene el formato que ocr_totales sabe
+        # leer — reintentarlo con Tesseract no lo va a cambiar, y son
+        # dos pasadas de OCR (~8s) sobre una imagen de 2200x3588.
+        if not totales and datos_paddle is None:
             try:
                 totales = extraer_totales_desde_imagen(binaria, lang=lang_usado or "eng")
             except Exception:
                 totales = {}
 
-        if not totales:
-            try:
-                totales = extraer_totales_desde_imagen(gris, lang=lang_usado or "eng")
-            except Exception:
-                totales = {}
+            if not totales:
+                try:
+                    totales = extraer_totales_desde_imagen(gris, lang=lang_usado or "eng")
+                except Exception:
+                    totales = {}
 
         lineas_debug = None
         if ruta_texto_debug and not items:
