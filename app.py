@@ -4,7 +4,8 @@ from flask import Flask, request, render_template, send_file, flash, redirect, u
 from openpyxl import Workbook, load_workbook
 import pytesseract
 
-from parser import procesar_factura, limpiar_numero, extraer_cabecera
+from parser import (procesar_factura, limpiar_numero, extraer_cabecera,
+                    limpiar_cantidad, limpiar_sku)
 from ocr_utils import es_imagen, convertir_imagen_a_pdf_ocr
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +56,28 @@ def asegurar_excel():
     _crear_libro_con_hojas().save(EXCEL_PATH)
 
 
+# Columnas de items que son montos y tienen que ir al Excel como NUMERO,
+# no como texto: si van como texto, Excel no las suma y ademas quedan con
+# separadores inconsistentes segun como las haya leido el OCR
+# ("9,968.23" en una fila y "9.722.83" en otra).
+ITEMS_COLUMNAS_MONTO = ("precio_unitario", "neto", "interno", "iva", "subtotal")
+
+
+def _valor_item(columna: str, valor):
+    """Normaliza el valor de una celda de item antes de escribirlo al
+    Excel: montos y cantidades como numero, sku sin la basura que el OCR
+    pego de la descripcion, y el resto tal cual."""
+    if valor is None:
+        return None
+    if columna in ITEMS_COLUMNAS_MONTO:
+        return limpiar_numero(valor)
+    if columna == "cantidad":
+        return limpiar_cantidad(valor)
+    if columna == "sku":
+        return limpiar_sku(valor)
+    return valor
+
+
 def _filas_de(nombre_archivo: str, resultado: dict):
     """Arma la fila de cabecera y las filas de ítems para una factura ya
     procesada, en el orden de CABECERA_COLUMNAS/ITEMS_COLUMNAS. La
@@ -65,7 +88,8 @@ def _filas_de(nombre_archivo: str, resultado: dict):
 
     numero_factura = cab.get("numero_factura")
     filas_items = [
-        [nombre_archivo, numero_factura] + [item.get(c) for c in ITEMS_COLUMNAS[2:]]
+        [nombre_archivo, numero_factura] + [_valor_item(c, item.get(c))
+                                            for c in ITEMS_COLUMNAS[2:]]
         for item in resultado["items"]
     ]
     return fila_cab, filas_items
@@ -162,15 +186,18 @@ def subir():
 
         resultado = procesar_factura(ruta_pdf)
 
-        # El PDF generado por OCR lleva SOLO la capa de texto de
-        # Tesseract sobre la version gris, asi que extraer la cabecera
-        # unicamente de ahi desperdicia lo que reconocieron mejor las
-        # otras pasadas. El texto combinado (Tesseract gris + binarizada
-        # + PaddleOCR) suele leer la cabecera bastante mejor: volvemos a
-        # correr los regex sobre el y completamos lo que quedo vacio.
         if texto_ocr_combinado:
-            cabecera_combinada = extraer_cabecera(texto_ocr_combinado)
-            for campo, valor in cabecera_combinada.items():
+            # El texto combinado TIENE PRIORIDAD sobre el del PDF: el PDF
+            # lleva solo la capa de Tesseract sobre la version gris, que
+            # es la lectura MENOS confiable de las tres. Si se usa como
+            # base y el texto combinado solo rellena huecos, un valor
+            # equivocado pero no vacio de Tesseract nunca se corrige.
+            # Caso real: Tesseract leia numero_factura = "021-083431",
+            # que es el numero de IIBB, y tapaba el correcto
+            # ("0011-00016528") que si habia leido PaddleOCR.
+            cabecera_pdf = resultado["cabecera"]
+            resultado["cabecera"] = extraer_cabecera(texto_ocr_combinado)
+            for campo, valor in cabecera_pdf.items():
                 if resultado["cabecera"].get(campo) is None and valor is not None:
                     resultado["cabecera"][campo] = valor
 
